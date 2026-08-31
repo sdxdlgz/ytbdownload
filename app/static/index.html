@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d100c">
+  <meta name="description" content="自托管的 yt-dlp Web 下载工作台：分析并下载视频、音频、字幕和封面。">
+  <title>SIGNAL / 媒体下载工作台</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#download-console">跳到下载输入框</a>
+  <div class="page-grain" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <a class="brand" href="#top" aria-label="SIGNAL 首页">
+      <svg class="brand-mark" aria-hidden="true"><use href="/static/icons.svg#signal"></use></svg>
+      <span class="brand-word">SIGNAL</span>
+      <span class="brand-slash">//</span>
+      <span class="brand-meta">DL<br>WORKS</span>
+    </a>
+
+    <div class="topbar-actions">
+      <button class="system-status" id="system-status" type="button" aria-label="查看服务状态">
+        <span class="status-light" aria-hidden="true"></span>
+        <span id="system-status-label">CHECKING</span>
+      </button>
+      <button class="icon-button labeled" id="history-button" type="button" aria-label="传输记录" aria-haspopup="dialog" aria-controls="history-drawer">
+        <svg aria-hidden="true"><use href="/static/icons.svg#history"></use></svg>
+        <span>传输记录</span>
+        <span class="count-badge" id="history-count">0</span>
+      </button>
+      <button class="icon-button auth-control" id="auth-control" type="button" hidden>
+        <svg aria-hidden="true"><use href="/static/icons.svg#lock"></use></svg>
+        <span id="auth-control-label">访问令牌</span>
+      </button>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <div class="eyebrow reveal-one">
+          <span class="eyebrow-index">01—26</span>
+          <span>SELF-HOSTED MEDIA TRANSFER</span>
+        </div>
+        <h1 id="hero-title" class="hero-title">
+          <span class="title-line reveal-two">CAPTURE</span>
+          <span class="title-line outline reveal-three">EVERY <em>FRAME.</em></span>
+        </h1>
+        <div class="hero-note reveal-four">
+          <span class="note-arrow" aria-hidden="true">↘</span>
+          <p>粘贴一个链接，先看清内容和格式，再把视频、音频、字幕或封面带走。</p>
+        </div>
+      </div>
+
+      <div class="console-wrap reveal-five" id="download-console">
+        <div class="console-kicker">
+          <span>ROUTE INPUT</span>
+          <span class="console-kicker-right"><i aria-hidden="true"></i> ENCRYPTED / LOCAL</span>
+        </div>
+        <form class="url-console" id="url-form" novalidate>
+          <label for="url-input">媒体链接</label>
+          <div class="url-field-shell">
+            <svg class="url-icon" aria-hidden="true"><use href="/static/icons.svg#link"></use></svg>
+            <input
+              id="url-input"
+              name="url"
+              type="url"
+              inputmode="url"
+              autocomplete="url"
+              spellcheck="false"
+              placeholder="https://www.youtube.com/watch?v=..."
+              aria-describedby="url-hint url-error"
+              required
+            >
+            <button class="paste-button" id="paste-button" type="button" aria-label="从剪贴板粘贴链接">
+              <svg aria-hidden="true"><use href="/static/icons.svg#paste"></use></svg>
+              <span>粘贴</span>
+            </button>
+          </div>
+          <p class="field-error" id="url-error" role="alert"></p>
+          <div class="console-options">
+            <label class="switch-row">
+              <input id="playlist-toggle" type="checkbox">
+              <span class="switch" aria-hidden="true"><i></i></span>
+              <span>
+                <strong>允许播放列表</strong>
+                <small id="playlist-limit-note">最多 20 项</small>
+              </span>
+            </label>
+            <span class="url-hint" id="url-hint">HTTP(S) · 不支持 DRM 与直播</span>
+          </div>
+          <button class="analyze-button" id="analyze-button" type="submit">
+            <span class="button-label">解析链接</span>
+            <span class="button-code">RUN / 01</span>
+            <svg aria-hidden="true"><use href="/static/icons.svg#arrow-up-right"></use></svg>
+          </button>
+        </form>
+        <div class="drop-hint" id="drop-hint" aria-hidden="true">
+          <svg><use href="/static/icons.svg#link"></use></svg>
+          <strong>把链接放在这里</strong>
+        </div>
+        <div class="console-footer">
+          <span>POWERED BY <strong>yt-dlp</strong></span>
+          <span id="extractor-count">1,000+ EXTRACTORS</span>
+        </div>
+      </div>
+
+      <div class="signal-decoration" aria-hidden="true">
+        <span></span><span></span><span></span><span></span><span></span><span></span>
+      </div>
+    </section>
+
+    <section class="platform-ticker" aria-label="重点支持的平台">
+      <div class="ticker-label">ROUTES</div>
+      <div class="ticker-window">
+        <div class="ticker-track" id="platform-ticker">
+          <span>YOUTUBE</span><i>✳</i><span>BILIBILI</span><i>✳</i><span>TIKTOK</span><i>✳</i><span>INSTAGRAM</span><i>✳</i><span>VIMEO</span><i>✳</i><span>SOUNDCLOUD</span><i>✳</i><span>X / TWITTER</span><i>✳</i><span>TWITCH</span><i>✳</i>
+          <span aria-hidden="true">YOUTUBE</span><i aria-hidden="true">✳</i><span aria-hidden="true">BILIBILI</span><i aria-hidden="true">✳</i><span aria-hidden="true">TIKTOK</span><i aria-hidden="true">✳</i><span aria-hidden="true">INSTAGRAM</span><i aria-hidden="true">✳</i><span aria-hidden="true">VIMEO</span><i aria-hidden="true">✳</i><span aria-hidden="true">SOUNDCLOUD</span><i aria-hidden="true">✳</i><span aria-hidden="true">X / TWITTER</span><i aria-hidden="true">✳</i><span aria-hidden="true">TWITCH</span><i aria-hidden="true">✳</i>
+        </div>
+      </div>
+    </section>
+
+    <section class="workspace" id="workspace" aria-labelledby="workspace-title" hidden>
+      <div class="section-rail" aria-hidden="true">
+        <span>02</span>
+        <i></i>
+        <span>INSPECT</span>
+      </div>
+
+      <div class="workspace-main">
+        <div class="workspace-heading">
+          <div>
+            <p class="section-kicker">SIGNAL ACQUIRED</p>
+            <h2 id="workspace-title">检查媒体，选择输出。</h2>
+          </div>
+          <button class="text-button" id="reset-button" type="button">
+            <svg aria-hidden="true"><use href="/static/icons.svg#refresh"></use></svg>
+            分析另一个链接
+          </button>
+        </div>
+
+        <div class="analysis-loading" id="analysis-loading" aria-live="polite" hidden>
+          <div class="scanner-card">
+            <div class="scanner-visual" aria-hidden="true">
+              <div class="scanner-grid"></div>
+              <div class="scanner-line"></div>
+              <svg><use href="/static/icons.svg#signal"></use></svg>
+            </div>
+            <div class="scanner-copy">
+              <span class="loading-code" id="loading-code">EXTRACT / 000</span>
+              <h3>正在向来源站点询问信号…</h3>
+              <p id="loading-message">读取标题、封面和可用画质。不同站点可能需要几秒钟。</p>
+              <div class="loading-dots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="analysis-error error-panel" id="analysis-error" role="alert" hidden>
+          <div class="error-symbol" aria-hidden="true">!</div>
+          <div>
+            <span class="error-code" id="analysis-error-code">EXTRACTOR_ERROR</span>
+            <h3>没有拿到可用信号</h3>
+            <p id="analysis-error-message"></p>
+            <button class="secondary-button" id="retry-button" type="button">重新尝试</button>
+          </div>
+        </div>
+
+        <article class="media-result" id="media-result" hidden>
+          <div class="media-overview">
+            <figure class="cover-frame" id="cover-frame">
+              <img id="media-cover" src="/static/favicon.svg" alt="" referrerpolicy="no-referrer" hidden>
+              <div class="cover-fallback" id="cover-fallback" aria-hidden="true">
+                <svg><use href="/static/icons.svg#signal"></use></svg>
+                <span>NO PREVIEW</span>
+              </div>
+              <figcaption>
+                <span id="media-platform">SOURCE</span>
+                <span id="media-kind">SINGLE</span>
+              </figcaption>
+            </figure>
+
+            <div class="media-copy">
+              <div class="media-topline">
+                <span class="source-chip" id="source-chip">ROUTE / UNKNOWN</span>
+                <span class="restriction-chip" id="restriction-chip" hidden>受限</span>
+              </div>
+              <h3 id="media-title">—</h3>
+              <p class="media-uploader" id="media-uploader">—</p>
+              <dl class="media-stats">
+                <div><dt>时长</dt><dd id="media-duration">—</dd></div>
+                <div><dt>画质</dt><dd id="media-quality">—</dd></div>
+                <div><dt>格式</dt><dd id="media-format-count">—</dd></div>
+                <div><dt>字幕</dt><dd id="media-subtitle-count">—</dd></div>
+              </dl>
+              <p class="media-description" id="media-description"></p>
+              <button class="inline-toggle" id="playlist-entries-toggle" type="button" hidden>
+                <span>查看播放列表项目</span>
+                <svg aria-hidden="true"><use href="/static/icons.svg#chevron-down"></use></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="playlist-entries" id="playlist-entries" hidden>
+            <div class="subsection-heading">
+              <h4>播放列表清单</h4>
+              <span id="playlist-entry-count">0 ITEMS</span>
+            </div>
+            <ol id="playlist-entry-list"></ol>
+          </div>
+
+          <div class="choice-workbench">
+            <div class="choice-header">
+              <div>
+                <span class="step-number">02.A</span>
+                <h3>选择输出线路</h3>
+              </div>
+              <div class="choice-tabs" role="tablist" aria-label="下载类型">
+                <button id="tab-recommended" type="button" role="tab" aria-selected="true" data-choice-tab="recommended">推荐</button>
+                <button id="tab-formats" type="button" role="tab" aria-selected="false" data-choice-tab="formats">具体格式</button>
+                <button id="tab-audio" type="button" role="tab" aria-selected="false" data-choice-tab="audio">音频</button>
+                <button id="tab-thumbnail" type="button" role="tab" aria-selected="false" data-choice-tab="thumbnail">封面</button>
+              </div>
+            </div>
+
+            <div class="choice-list" id="choice-list" role="radiogroup" aria-label="下载选项"></div>
+            <div class="choice-empty" id="choice-empty" hidden>这个媒体没有此类可用输出。</div>
+
+            <details class="advanced-options" id="advanced-options">
+              <summary>
+                <span><svg aria-hidden="true"><use href="/static/icons.svg#sliders"></use></svg>附加选项</span>
+                <svg class="summary-arrow" aria-hidden="true"><use href="/static/icons.svg#chevron-down"></use></svg>
+              </summary>
+              <div class="advanced-grid">
+                <label class="check-row">
+                  <input type="checkbox" id="embed-metadata" checked>
+                  <span class="check-box" aria-hidden="true"><svg><use href="/static/icons.svg#check"></use></svg></span>
+                  <span><strong>写入媒体元数据</strong><small>使用 ffmpeg 写入标题等标签</small></span>
+                </label>
+                <div class="subtitle-options" id="subtitle-options" hidden>
+                  <div class="subtitle-heading">
+                    <strong>同时保存字幕</strong>
+                    <small>最多选择 5 种</small>
+                  </div>
+                  <div class="subtitle-list" id="subtitle-list"></div>
+                </div>
+              </div>
+            </details>
+
+            <div class="download-action-row">
+              <div class="selection-summary">
+                <span>SELECTED OUTPUT</span>
+                <strong id="selection-label">尚未选择</strong>
+                <small id="selection-description">请选择一个输出线路</small>
+              </div>
+              <button class="download-button" id="download-button" type="button" disabled>
+                <span>开始传输</span>
+                <small>QUEUE / 02</small>
+                <svg aria-hidden="true"><use href="/static/icons.svg#download"></use></svg>
+              </button>
+            </div>
+          </div>
+        </article>
+
+        <section class="active-transfer" id="active-transfer" aria-labelledby="transfer-title" hidden>
+          <div class="transfer-heading">
+            <div>
+              <p class="section-kicker">TRANSFER MONITOR</p>
+              <h2 id="transfer-title">正在搬运字节。</h2>
+            </div>
+            <span class="transfer-status" id="transfer-status">QUEUED</span>
+          </div>
+          <div class="transfer-card">
+            <div class="transfer-index" id="transfer-index">JOB<br>0000</div>
+            <div class="transfer-body">
+              <div class="transfer-title-row">
+                <div>
+                  <span id="transfer-platform">SOURCE</span>
+                  <h3 id="transfer-media-title">—</h3>
+                  <p id="transfer-choice">—</p>
+                </div>
+                <strong class="progress-number" id="progress-number">0%</strong>
+              </div>
+              <progress id="transfer-progress" max="100" value="0">0%</progress>
+              <div class="transfer-metrics">
+                <div><span>阶段</span><strong id="transfer-phase">排队中</strong></div>
+                <div><span>已接收</span><strong id="transfer-bytes">—</strong></div>
+                <div><span>速度</span><strong id="transfer-speed">—</strong></div>
+                <div><span>剩余</span><strong id="transfer-eta">—</strong></div>
+              </div>
+              <div class="transfer-error" id="transfer-error" role="alert" hidden></div>
+              <div class="artifact-list" id="artifact-list" hidden></div>
+            </div>
+            <div class="transfer-actions">
+              <button class="danger-button" id="cancel-job-button" type="button">
+                <svg aria-hidden="true"><use href="/static/icons.svg#x"></use></svg>
+                取消任务
+              </button>
+              <button class="secondary-button" id="dismiss-job-button" type="button" hidden>收起</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="process-section" aria-labelledby="process-title">
+      <div class="process-intro">
+        <p class="section-kicker">NO BLACK BOX</p>
+        <h2 id="process-title">三步。<br><span>每一步都看得见。</span></h2>
+        <p>先分析，再决定。服务器不会在你选择格式前偷偷开始下载。</p>
+      </div>
+      <ol class="process-list">
+        <li>
+          <span class="process-number">01</span>
+          <svg aria-hidden="true"><use href="/static/icons.svg#link"></use></svg>
+          <div><h3>贴入链接</h3><p>支持 YouTube 以及 yt-dlp 的 1,000+ 提取器。</p></div>
+        </li>
+        <li>
+          <span class="process-number">02</span>
+          <svg aria-hidden="true"><use href="/static/icons.svg#sliders"></use></svg>
+          <div><h3>看清再选</h3><p>画质、容器、大小、音频和封面一目了然。</p></div>
+        </li>
+        <li>
+          <span class="process-number">03</span>
+          <svg aria-hidden="true"><use href="/static/icons.svg#download"></use></svg>
+          <div><h3>拿走文件</h3><p>实时进度、可取消、支持断点范围请求与自动清理。</p></div>
+        </li>
+      </ol>
+    </section>
+
+    <section class="capability-section" aria-labelledby="capability-title">
+      <div class="capability-visual" aria-hidden="true">
+        <div class="orbit orbit-one"></div>
+        <div class="orbit orbit-two"></div>
+        <svg><use href="/static/icons.svg#signal"></use></svg>
+        <span class="orbit-label label-one">VIDEO</span>
+        <span class="orbit-label label-two">AUDIO</span>
+        <span class="orbit-label label-three">COVER</span>
+      </div>
+      <div class="capability-copy">
+        <p class="section-kicker">ONE LINK / MANY OUTPUTS</p>
+        <h2 id="capability-title">不止 YouTube。<br>也不止视频。</h2>
+        <p>同一套界面适配 yt-dlp 支持的平台。自动合并视频与音频，或单独提取 MP3、M4A、Opus 和封面。</p>
+        <ul>
+          <li><span>01</span>最高画质与分辨率上限预设</li>
+          <li><span>02</span>精确格式、字幕与播放列表</li>
+          <li><span>03</span>原图 / JPG / PNG 封面输出</li>
+          <li><span>04</span>可选 cookies 处理登录媒体</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-brand">
+      <svg aria-hidden="true"><use href="/static/icons.svg#signal"></use></svg>
+      <strong>SIGNAL // DL WORKS</strong>
+    </div>
+    <p>仅下载你有权保存的内容。本站与 YouTube 及其他平台无隶属关系。</p>
+    <div class="footer-links">
+      <span id="footer-version">WEB / 1.0.0</span>
+      <a href="https://github.com/sdxdlgz/ytbdownload" target="_blank" rel="noreferrer">
+        <svg aria-hidden="true"><use href="/static/icons.svg#github"></use></svg> SOURCE
+      </a>
+    </div>
+  </footer>
+
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <aside class="history-drawer" id="history-drawer" role="dialog" aria-modal="true" aria-labelledby="history-title" hidden>
+    <div class="drawer-header">
+      <div><span>LOCAL LEDGER</span><h2 id="history-title">传输记录</h2></div>
+      <button class="close-button" id="history-close" type="button" aria-label="关闭传输记录">
+        <svg aria-hidden="true"><use href="/static/icons.svg#close"></use></svg>
+      </button>
+    </div>
+    <div class="drawer-toolbar">
+      <p>任务记录保存在这台服务器，并会按过期时间自动清理。</p>
+      <button class="text-button" id="refresh-history" type="button"><svg aria-hidden="true"><use href="/static/icons.svg#refresh"></use></svg>刷新</button>
+    </div>
+    <div class="history-list" id="history-list"></div>
+    <div class="history-empty" id="history-empty">
+      <svg aria-hidden="true"><use href="/static/icons.svg#history"></use></svg>
+      <h3>还没有传输记录</h3>
+      <p>分析一个链接并选择输出，任务会出现在这里。</p>
+    </div>
+  </aside>
+
+  <dialog class="auth-dialog" id="auth-dialog" aria-labelledby="auth-title">
+    <form method="dialog" id="auth-form">
+      <div class="auth-mark" aria-hidden="true"><svg><use href="/static/icons.svg#lock"></use></svg></div>
+      <p class="section-kicker">PRIVATE INSTANCE</p>
+      <h2 id="auth-title">这台下载器需要通行码。</h2>
+      <p>输入 VPS 管理员设置的访问令牌。令牌只用于建立本站的 HttpOnly 会话。</p>
+      <label for="token-input">访问令牌</label>
+      <div class="token-field">
+        <input id="token-input" type="password" autocomplete="current-password" required>
+        <button id="toggle-token" type="button" aria-label="显示访问令牌"><svg aria-hidden="true"><use href="/static/icons.svg#eye"></use></svg></button>
+      </div>
+      <p class="field-error" id="auth-error" role="alert"></p>
+      <button class="analyze-button" id="auth-submit" type="submit">
+        <span>解锁工作台</span><small>AUTH / 00</small><svg aria-hidden="true"><use href="/static/icons.svg#arrow-up-right"></use></svg>
+      </button>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="false"></div>
+
+  <template id="choice-template">
+    <label class="choice-card">
+      <input type="radio" name="download-choice">
+      <span class="choice-selector" aria-hidden="true"><i></i></span>
+      <span class="choice-copy"><strong></strong><small></small></span>
+      <span class="choice-meta"><em></em><b></b></span>
+    </label>
+  </template>
+
+  <template id="artifact-template">
+    <a class="artifact-item">
+      <span class="artifact-icon"><svg aria-hidden="true"><use href="/static/icons.svg#file"></use></svg></span>
+      <span class="artifact-copy"><strong></strong><small></small></span>
+      <span class="artifact-action"><svg aria-hidden="true"><use href="/static/icons.svg#download"></use></svg></span>
+    </a>
+  </template>
+
+  <template id="history-template">
+    <article class="history-item">
+      <div class="history-item-top">
+        <span class="history-state"></span>
+        <time></time>
+      </div>
+      <h3>任务</h3>
+      <p class="history-choice"></p>
+      <progress max="100" value="0"></progress>
+      <div class="history-item-bottom">
+        <span class="history-detail"></span>
+        <div class="history-actions"></div>
+      </div>
+    </article>
+  </template>
+</body>
+</html>

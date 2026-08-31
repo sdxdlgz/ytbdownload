@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signal-yt-dlp-web"
+version = "1.0.0"
+description = "A secure, self-hosted web interface for yt-dlp"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "sdxdlgz" }]
+dependencies = [
+  "fastapi>=0.115.0,<1.0",
+  "pydantic-settings>=2.6.0,<3.0",
+  "uvicorn[standard]>=0.30.0,<1.0",
+  "yt-dlp[default,curl-cffi]>=2025.8.22,<2027.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "httpx2>=2.12.0,<3.0",
+  "pytest>=9.0.3,<10.0",
+  "pytest-asyncio>=1.0.0,<2.0",
+  "pytest-cov>=6.0.0,<7.0",
+  "playwright>=1.50.0,<2.0",
+  "bandit>=1.8.0,<2.0",
+  "pip-audit>=2.8.0,<3.0",
+  "ruff>=0.9.0,<1.0",
+]
+
+[project.scripts]
+ytdlp-web = "app.main:run"
+ytdlp-web-worker = "app.worker:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["static/*", "static/fonts/*", "templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+markers = [
+  "integration: exercises real yt-dlp and ffmpeg against a local media server",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["data", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501", "RUF001"]

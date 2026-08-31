@@ -1,0 +1,33 @@
+{
+	admin off
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$SITE_ADDRESS:http://localhost} {
+	encode zstd gzip
+
+	request_body {
+		max_size 64KB
+	}
+
+	header {
+		-Server
+		X-Robots-Tag "noindex, nofollow, noarchive"
+	}
+
+	reverse_proxy app:8000 {
+		health_uri /api/v1/health/ready
+		health_headers {
+			Host localhost
+		}
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

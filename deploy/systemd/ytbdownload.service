@@ -1,0 +1,62 @@
+[Unit]
+Description=Signal yt-dlp Web downloader
+Documentation=https://github.com/sdxdlgz/ytbdownload
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@@SERVICE_USER@@
+Group=@@SERVICE_USER@@
+SupplementaryGroups=@@ARTIFACT_GROUP@@
+WorkingDirectory=@@INSTALL_DIR@@
+EnvironmentFile=@@INSTALL_DIR@@/.env
+Environment="PATH=@@INSTALL_DIR@@/.venv/bin:@@INSTALL_DIR@@/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+Environment="HOME=/tmp"
+Environment="XDG_CACHE_HOME=/tmp/.cache"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONDONTWRITEBYTECODE=1"
+ExecStart=@@INSTALL_DIR@@/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+KillMode=control-group
+UMask=0027
+
+# Resource guardrails for a small VPS. Adjust with a systemd drop-in if needed.
+TasksMax=256
+LimitNOFILE=65536
+MemoryHigh=1536M
+MemoryMax=2G
+CPUQuota=200%
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+# Service sandboxing. Only the data directory is writable.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=@@INSTALL_DIR@@
+ReadWritePaths=@@INSTALL_DIR@@/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

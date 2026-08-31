@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install project
+        run: python -m pip install -e '.[test]'
+      - name: Lint and syntax checks
+        run: |
+          ruff check app tests
+          ruff format --check app tests
+          node --check app/static/app.js
+          bandit -q -r app
+          pip-audit
+      - name: Unit and real local integration tests
+        run: pytest -q --cov=app --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and Chromium
+        run: |
+          python -m pip install -e '.[test]'
+          playwright install --with-deps chromium
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Run responsive browser smoke flow
+        run: |
+          ./scripts/test-browser.sh
+          ./scripts/test-browser-real.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-screenshots
+          path: |
+            artifacts/browser
+            artifacts/browser-real
+          if-no-files-found: ignore
+
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: signal-ytdlp-web:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Inspect runtime dependencies
+        run: |
+          docker run --rm --entrypoint python signal-ytdlp-web:ci -c "import app, yt_dlp; print(yt_dlp.version.__version__)"
+          docker run --rm --entrypoint ffmpeg signal-ytdlp-web:ci -version | head -n 1
+          docker run --rm --entrypoint deno signal-ytdlp-web:ci --version | head -n 1

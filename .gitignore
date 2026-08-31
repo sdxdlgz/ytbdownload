@@ -1,0 +1,41 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.cookies.txt
+cookies.txt
+
+# Runtime state and downloaded media
+data/
+artifacts/
+*.part
+*.ytdl
+*.temp
+*.log
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Planning scratch files (kept locally by the coding workflow)
+task_plan.md
+findings.md
+progress.md
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
