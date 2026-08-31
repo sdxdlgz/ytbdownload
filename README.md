@@ -1,7 +1,7 @@
 # SIGNAL / yt-dlp Web
 
 <p align="center">
-  <strong>一个可部署到 Debian VPS 的自托管多平台媒体下载工作台。</strong><br>
+  <strong>一个适用于 Docker 与 Linux 服务器的自托管多平台媒体下载服务。</strong><br>
   粘贴链接 → 查看元数据与格式 → 下载视频、音频、字幕或封面。
 </p>
 
@@ -26,7 +26,7 @@
 - **字幕与元数据**：手动/自动字幕选择，ffmpeg 媒体标签。
 - **真实任务状态**：持久队列、下载进度、速度、ETA、后处理阶段、取消、历史记录、Range 文件发送、TTL 清理。
 - **可选私有访问**：共享强令牌换取 HttpOnly / SameSite=Strict Cookie。
-- **VPS 防护**：初始 URL SSRF 检查、Host/Origin 校验、限流、并发/大小/时长/磁盘上限、独立 worker 进程组、超时 TERM→KILL、可选 nftables egress。
+- **服务端防护**：初始 URL SSRF 检查、Host/Origin 校验、限流、并发/大小/时长/磁盘上限、独立 worker 进程组、超时 TERM→KILL、可选 nftables egress。
 - **部署齐全**：Docker Compose + Caddy 自动 HTTPS，或原生 systemd + Nginx `X-Accel-Redirect`。
 
 ## 快速开始（本地开发）
@@ -59,7 +59,7 @@ sed -i 's|YTDLP_WEB_DATA_DIR=/data|YTDLP_WEB_DATA_DIR=./data|' .env
 
 > `.env.example` 的 `CHANGE_ME` 只是占位符，production 模式会拒绝带占位符或过短的 token 启动。即使本地运行也应换成随机 token/secret；完全不需要鉴权时可把 `YTDLP_WEB_ACCESS_TOKEN` 留空。
 
-## Debian VPS 部署
+## 部署
 
 ### 方式 A：原生一键安装
 
@@ -97,7 +97,51 @@ docker compose -f compose.yml -f deploy/compose.caddy.yml up -d --build
 docker compose -f compose.yml -f deploy/compose.caddy.yml ps
 ```
 
-完整的 DNS、纯 IP、cookies、备份、加固、更新、卸载和故障排查步骤见 **[Debian VPS 部署指南](docs/deployment.md)**。
+完整的 DNS、纯 IP、cookies、备份、加固、更新、卸载和故障排查步骤见 **[服务器部署指南](docs/deployment.md)**。
+
+## Docker 镜像
+
+仓库已包含生产用多阶段 `Dockerfile`，CI 会实际构建并检查镜像。镜像内包含 Python 应用、yt-dlp、ffmpeg、Deno 和 `tini`，默认以非 root 用户运行，并支持 `linux/amd64` 与 `linux/arm64`。
+
+本地构建：
+
+```bash
+docker build --build-arg APP_VERSION=1.1.0 -t signal-yt-dlp-web:1.1.0 .
+```
+
+直接运行：
+
+```bash
+cp .env.example .env
+# 先替换 .env 中的 token、secret、allowed hosts 等生产配置
+docker volume create signal-data
+
+docker run -d \
+  --name signal-yt-dlp-web \
+  --restart unless-stopped \
+  --env-file .env \
+  -p 127.0.0.1:8000:8000 \
+  -v signal-data:/data \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  signal-yt-dlp-web:1.1.0
+```
+
+如需发布到 GHCR、Docker Hub 或其他 OCI registry，可使用 `buildx`：
+
+```bash
+echo "$REGISTRY_TOKEN" | docker login ghcr.io -u OWNER --password-stdin
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --build-arg APP_VERSION=1.1.0 \
+  -t ghcr.io/OWNER/ytbdownload:1.1.0 \
+  -t ghcr.io/OWNER/ytbdownload:latest \
+  --push .
+```
+
+仓库当前的 GitHub Actions 只验证镜像可构建，不会自动推送到 registry；发布时应使用具备最小 package 写权限的 token。
 
 ## 使用流程
 
@@ -180,17 +224,27 @@ OpenAPI JSON：`/api/v1/openapi.json`。
 | `DIRECT_LINK_TTL_MINUTES` | `120` | IDM/aria2 临时 bearer URL 默认有效期 |
 | `S3_ENABLED` | `false` | 启用私有 S3-compatible 产物上传 |
 | `S3_BUCKET` / `S3_ENDPOINT_URL` | 空 | bucket 与可选 R2/B2/MinIO endpoint |
-| `S3_KEEP_LOCAL` | `true` | S3 成功后是否保留 VPS 本地副本 |
+| `S3_KEEP_LOCAL` | `true` | S3 成功后是否保留服务器本地副本 |
 | `S3_FAILURE_MODE` | `fallback` | 上传失败回退本地或 `required` 使任务失败 |
 | `S3_DELETE_ON_EXPIRY` | `true` | TTL/手动清理时由 durable outbox 删除远端对象 |
 | `S3_PRESIGN_TTL_SECONDS` | `7200` | S3 GET/HEAD presigned URL 最长有效期 |
 | `COOKIES_FILE` | 空 | 管理员只读 Netscape cookies 文件 |
 | `JS_RUNTIME` | `deno` | YouTube EJS runtime |
+| `IMPERSONATE` | 空 | 可选 yt-dlp/curl-cffi HTTP/TLS 客户端模拟；并非指纹浏览器 |
 | `X_ACCEL_REDIRECT` | `false` | 仅配合 supplied Nginx alias 开启 |
+
+## 浏览器、请求模拟与 JavaScript 运行时
+
+生产服务**不会启动所谓的“指纹浏览器”**，也不会创建浏览器配置文件或保存浏览器账号。相关组件的边界如下：
+
+- **Playwright / Chromium**：仅位于 `test` 可选依赖和 CI 浏览器测试中，不会安装进生产镜像。
+- **Deno**：用于 yt-dlp 的 YouTube EJS 签名挑战，是无界面的 JavaScript 运行时，不是浏览器。
+- **curl-cffi impersonation**：yt-dlp 的可选网络兼容能力。只有显式设置 `YTDLP_WEB_IMPERSONATE` 时，才会模拟指定浏览器客户端的 HTTP/TLS 请求特征；默认值为空，不启用。它不等于完整浏览器，更不提供多账号、代理编排或反检测配置管理。
+- **Cookies**：如目标站点需要登录态，只能由管理员挂载只读 Netscape cookies 文件；网页用户不能上传 cookies。
 
 ## S3 与临时直链
 
-S3 主要改善“成品文件 → 用户”的下载线路；首次任务会额外经历 VPS→S3 上传。应选择到目标用户网络更好的 region/endpoint，并保持 bucket 私有。
+对象存储主要改善“成品文件 → 客户端”的交付线路；首次任务会额外经历应用服务器到对象存储的上传。应选择与主要客户端网络质量匹配的 region/endpoint，并保持 bucket 私有。
 
 ```dotenv
 YTDLP_WEB_S3_ENABLED=true
@@ -204,7 +258,7 @@ YTDLP_WEB_S3_KEEP_LOCAL=false
 YTDLP_WEB_S3_FAILURE_MODE=required
 ```
 
-任务完成后，稳定鉴权下载接口会对 S3 返回 method-specific `307`；页面“复制临时直链”生成无需 Cookie 的 HMAC capability，GET/HEAD/Range 都可用。任何获得直链的人在过期前均可下载，不要发到公开渠道。完整 provider、IAM、lifecycle 与中国大陆线路说明见 [部署指南](docs/deployment.md#6-s3-compatible-对象存储与临时直链)。
+任务完成后，稳定鉴权下载接口会对 S3 返回 method-specific `307`；页面“复制临时直链”生成无需 Cookie 的 HMAC capability，GET/HEAD/Range 都可用。任何获得直链的人在过期前均可下载，不要发到公开渠道。完整 provider、IAM、lifecycle 与跨区域网络选型说明见 [部署指南](docs/deployment.md#6-s3-compatible-对象存储与临时直链)。
 
 
 ## 测试
@@ -231,7 +285,7 @@ make test-browser-real
 
 ## 安全边界
 
-初始 URL 校验不能单独解决 extractor 后续重定向、manifest URL 与 DNS rebinding。公开部署应再使用 VPS 防火墙/安全组/强制代理限制到私网和 cloud metadata 的 egress；原生安装提供可选脚本：
+初始 URL 校验不能单独解决 extractor 后续重定向、manifest URL 与 DNS rebinding。公开部署应再使用主机防火墙、安全组或强制代理限制到私网和 cloud metadata 的 egress；原生安装提供可选脚本：
 
 ```bash
 sudo ./scripts/install-egress-firewall.sh

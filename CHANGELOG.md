@@ -16,6 +16,7 @@ All notable changes to this project are documented here.
 
 - Version bumped to 1.1.0; health/config/job metadata report delivery capabilities without persisting or serializing bucket, key, endpoint or credentials. Authorized delivery still uses a short-lived presigned `Location` by design.
 - Production reverse proxies suppress `/d/*` bearer URLs from access logs.
+- Generalized the public documentation and added standalone/multi-architecture Docker image build, run, and registry publishing instructions plus runtime browser-dependency boundaries.
 
 ### Fixed
 
