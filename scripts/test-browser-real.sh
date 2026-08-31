@@ -3,6 +3,10 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -z "$PYTHON_BIN" ]]; then
+  if [[ -x .venv/bin/python ]]; then PYTHON_BIN=.venv/bin/python; else PYTHON_BIN=python3; fi
+fi
 DATA_DIR="$(mktemp -d -t ytbdownload-browser-real-XXXXXX)"
 SERVER_PID=""
 
@@ -29,13 +33,13 @@ export YTDLP_WEB_JS_RUNTIME=""
 export YTDLP_WEB_MIN_FREE_DISK_MB=32
 export YTDLP_WEB_MAX_FILESIZE_MB=100
 
-setsid .venv/bin/python -m uvicorn app.main:app \
+setsid "$PYTHON_BIN" -m uvicorn app.main:app \
   --host 127.0.0.1 --port 8766 --workers 1 --no-access-log &
 SERVER_PID=$!
-for _attempt in $(seq 1 60); do
+for _attempt in $(seq 1 240); do
   curl --fail --silent http://127.0.0.1:8766/api/v1/health/live >/dev/null && break
   kill -0 "$SERVER_PID" 2>/dev/null || { echo "Server exited early" >&2; exit 1; }
   sleep 0.25
 done
 curl --fail --silent http://127.0.0.1:8766/api/v1/health/live >/dev/null
-.venv/bin/python tests/browser_real_e2e.py
+"$PYTHON_BIN" tests/browser_real_e2e.py

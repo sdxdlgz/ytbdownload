@@ -15,3 +15,7 @@ All notable changes to this project are documented here.
 - Native Debian installer with systemd sandbox, Nginx X-Accel artifact delivery, separate artifact-reader group, Certbot, SSH-only updater, and optional nftables egress policy.
 - Unit, API, security, real yt-dlp/ffmpeg, process cancellation, Playwright, container, Nginx and deployment validation workflows.
 - Chinese README, detailed Debian deployment/security guide, security policy, MIT license, CI and Dependabot configuration.
+
+### Fixed
+
+- Browser test launchers now use the active CI Python when `.venv` is absent, while retaining local virtualenv auto-detection and a longer startup allowance.
