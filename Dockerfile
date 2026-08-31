@@ -23,7 +23,7 @@ RUN set -eux; \
     install -m 0755 deno /usr/local/bin/deno; \
     /usr/local/bin/deno --version
 
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 WORKDIR /src
@@ -32,7 +32,7 @@ COPY pyproject.toml README.md LICENSE ./
 COPY app ./app
 RUN /opt/venv/bin/pip install .
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 ARG APP_VERSION=1.1.0
 LABEL org.opencontainers.image.title="Signal yt-dlp Web" \
       org.opencontainers.image.description="Secure self-hosted web interface for yt-dlp" \
