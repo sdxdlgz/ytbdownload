@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "signal-yt-dlp-web"
-version = "1.0.0"
+version = "1.1.0"
 description = "A secure, self-hosted web interface for yt-dlp"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,6 +13,7 @@ authors = [{ name = "sdxdlgz" }]
 dependencies = [
   "fastapi>=0.115.0,<1.0",
   "pydantic-settings>=2.6.0,<3.0",
+  "boto3>=1.35.0,<2.0",
   "uvicorn[standard]>=0.30.0,<1.0",
   "yt-dlp[default,curl-cffi]>=2025.8.22,<2027.0",
 ]
@@ -45,6 +46,7 @@ addopts = "-ra --strict-markers"
 asyncio_mode = "auto"
 markers = [
   "integration: exercises real yt-dlp and ffmpeg against a local media server",
+  "s3integration: exercises real S3-compatible PUT, presigned GET/HEAD/Range, and deletion",
 ]
 
 [tool.ruff]

@@ -21,6 +21,8 @@
 - **封面输出**：原图、JPG、PNG，可独立下载。
 - **多平台**：不写死 YouTube；当前 yt-dlp 安装可加载约 1,700 个 extractor，包括 Bilibili、TikTok、Instagram、X/Twitter、Vimeo、SoundCloud、Twitch、Facebook、Reddit 等。
 - **有限播放列表**：显式开启、硬上限、自动 ZIP，同时保留单项文件。
+- **可选对象存储**：完成产物可事务式上传到私有 AWS S3、Cloudflare R2、Backblaze B2、Wasabi 或 MinIO；支持 multipart、SSE、失败回退与远端清理 outbox。
+- **临时签名直链**：LOCAL/S3 均可生成免 Cookie 的短期 HMAC URL，支持 GET/HEAD/Range，可直接交给 IDM/aria2。
 - **字幕与元数据**：手动/自动字幕选择，ffmpeg 媒体标签。
 - **真实任务状态**：持久队列、下载进度、速度、ETA、后处理阶段、取消、历史记录、Range 文件发送、TTL 清理。
 - **可选私有访问**：共享强令牌换取 HttpOnly / SameSite=Strict Cookie。
@@ -50,7 +52,7 @@ sed -i "s/CHANGE_ME_DIFFERENT_RANDOM_SECRET/$(python3 -c 'import secrets; print(
 sed -i 's/YTDLP_WEB_COOKIE_SECURE=true/YTDLP_WEB_COOKIE_SECURE=false/' .env
 sed -i 's|YTDLP_WEB_DATA_DIR=/data|YTDLP_WEB_DATA_DIR=./data|' .env
 
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
 打开 <http://127.0.0.1:8000>。
@@ -118,9 +120,13 @@ flowchart LR
   Q -->|new process group| W[yt-dlp worker]
   W --> Y[yt-dlp extractors]
   W --> F[ffmpeg / Deno]
-  W --> S[(isolated work + artifacts)]
-  A -->|authorize| N[Nginx X-Accel / FileResponse]
+  W --> S[(isolated local artifacts)]
+  W --> O[(private S3-compatible storage)]
+  A -->|authorize local| N[Nginx X-Accel / FileResponse]
+  A -->|307 presigned redirect| O
+  A -->|short-lived HMAC direct link| B
   N --> B
+  O --> B
 ```
 
 关键设计：
@@ -130,6 +136,8 @@ flowchart LR
 - **不接受任意 yt-dlp 参数**：浏览器只提交后端生成的 opaque choice ID；worker 重新提取并检查媒体身份/格式。
 - **不暴露原始 info dict**：只返回字段白名单，排除直链、headers、cookies、fragment。
 - **固定磁盘路径**：输出模板与磁盘文件名由应用控制，展示标题只用于安全的 Content-Disposition 名称。
+- **S3 不做半套切换**：对象 key 会先持久化，全部 PUT + HEAD 校验成功后一次事务切换 backend；失败可完整回退本地。
+- **删除先撤权再出队**：清理会原子撤销 artifact/直链并写入 durable S3 deletion outbox，网络删除失败指数退避；bucket lifecycle 是第二道保障。
 
 > 当前 dispatcher 设计要求每个部署只运行 **1 个 Uvicorn API worker**。媒体并发由 `YTDLP_WEB_MAX_CONCURRENT_OPERATIONS` 控制。要水平扩展时应迁移到 PostgreSQL + 独立队列系统。
 
@@ -148,6 +156,8 @@ flowchart LR
 | `GET` | `/api/v1/jobs/{id}` | 进度、阶段、错误、产物 |
 | `DELETE` | `/api/v1/jobs/{id}` | 活动任务取消；终态任务立即清理 |
 | `GET/HEAD` | `/api/v1/artifacts/{id}` | 鉴权下载，支持 Range |
+| `POST` | `/api/v1/artifacts/{id}/direct-links` | 鉴权生成短期免 Cookie HMAC 直链 |
+| `GET/HEAD` | `/d/{id}?expires=...&signature=...` | 本地 Range 文件或 S3 method-specific 307 |
 
 OpenAPI JSON：`/api/v1/openapi.json`。
 
@@ -167,9 +177,35 @@ OpenAPI JSON：`/api/v1/openapi.json`。
 | `MAX_PLAYLIST_ITEMS` | `20` | 播放列表硬上限 |
 | `MAX_STORAGE_MB` | `10240` | 超限时按 LRU 清理完成任务 |
 | `ARTIFACT_TTL_HOURS` | `12` | 产物保留时间 |
+| `DIRECT_LINK_TTL_MINUTES` | `120` | IDM/aria2 临时 bearer URL 默认有效期 |
+| `S3_ENABLED` | `false` | 启用私有 S3-compatible 产物上传 |
+| `S3_BUCKET` / `S3_ENDPOINT_URL` | 空 | bucket 与可选 R2/B2/MinIO endpoint |
+| `S3_KEEP_LOCAL` | `true` | S3 成功后是否保留 VPS 本地副本 |
+| `S3_FAILURE_MODE` | `fallback` | 上传失败回退本地或 `required` 使任务失败 |
+| `S3_DELETE_ON_EXPIRY` | `true` | TTL/手动清理时由 durable outbox 删除远端对象 |
+| `S3_PRESIGN_TTL_SECONDS` | `7200` | S3 GET/HEAD presigned URL 最长有效期 |
 | `COOKIES_FILE` | 空 | 管理员只读 Netscape cookies 文件 |
 | `JS_RUNTIME` | `deno` | YouTube EJS runtime |
 | `X_ACCEL_REDIRECT` | `false` | 仅配合 supplied Nginx alias 开启 |
+
+## S3 与临时直链
+
+S3 主要改善“成品文件 → 用户”的下载线路；首次任务会额外经历 VPS→S3 上传。应选择到目标用户网络更好的 region/endpoint，并保持 bucket 私有。
+
+```dotenv
+YTDLP_WEB_S3_ENABLED=true
+YTDLP_WEB_S3_BUCKET=my-private-media
+YTDLP_WEB_S3_REGION=ap-southeast-1
+# R2/B2/MinIO/Wasabi 才填写对应 endpoint；AWS S3 留空
+YTDLP_WEB_S3_ENDPOINT_URL=
+YTDLP_WEB_S3_ACCESS_KEY_ID=...
+YTDLP_WEB_S3_SECRET_ACCESS_KEY=...
+YTDLP_WEB_S3_KEEP_LOCAL=false
+YTDLP_WEB_S3_FAILURE_MODE=required
+```
+
+任务完成后，稳定鉴权下载接口会对 S3 返回 method-specific `307`；页面“复制临时直链”生成无需 Cookie 的 HMAC capability，GET/HEAD/Range 都可用。任何获得直链的人在过期前均可下载，不要发到公开渠道。完整 provider、IAM、lifecycle 与中国大陆线路说明见 [部署指南](docs/deployment.md#6-s3-compatible-对象存储与临时直链)。
+
 
 ## 测试
 
@@ -179,6 +215,9 @@ make verify
 
 # 只跑真实 yt-dlp + ffmpeg 管线
 make test-integration
+
+# 真实 MinIO：PUT / HEAD / presigned GET+HEAD+Range / deletion outbox
+make test-minio
 
 # Playwright：桌面/移动端、分析/选择/任务/历史 UI
 .venv/bin/playwright install --with-deps chromium

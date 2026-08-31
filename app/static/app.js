@@ -711,7 +711,7 @@ function renderActiveJob(job) {
 
   elements.transferError.hidden = !job.error;
   elements.transferError.textContent = job.error?.message || "";
-  renderArtifacts(job.artifacts || []);
+  renderArtifacts(job.status === "completed" ? job.artifacts || [] : []);
   elements.cancelJobButton.hidden = !ACTIVE_STATES.has(job.status);
   elements.cancelJobButton.disabled = job.status === "cancelling";
   elements.dismissJobButton.hidden = ACTIVE_STATES.has(job.status);
@@ -729,16 +729,70 @@ function renderArtifacts(artifacts) {
   elements.artifactList.hidden = !artifacts.length;
   for (const artifact of artifacts) {
     const fragment = elements.artifactTemplate.content.cloneNode(true);
-    const link = fragment.querySelector(".artifact-item");
+    const item = fragment.querySelector(".artifact-item");
     const title = fragment.querySelector(".artifact-copy strong");
     const detail = fragment.querySelector(".artifact-copy small");
-    link.href = artifact.download_url;
-    link.setAttribute("download", "");
+    const download = fragment.querySelector(".artifact-download");
+    const copyLink = fragment.querySelector(".artifact-link-button");
+    const backend = fragment.querySelector(".artifact-backend");
+    download.href = artifact.download_url;
+    // The stable href is same-origin even when the API later redirects to S3.
+    // Mark it as a download up front so Chromium keeps 307 delivery in download mode.
+    download.setAttribute("download", artifact.filename);
+    download.setAttribute("aria-label", `下载 ${artifact.filename}`);
+    copyLink.setAttribute("aria-label", `复制 ${artifact.filename} 的临时直链`);
+    copyLink.hidden = !state.config?.features?.direct_links;
+    copyLink.addEventListener("click", () => void copyArtifactDirectLink(artifact, copyLink));
     title.textContent = artifact.filename;
+    const storage = (artifact.storage_backend || "local").toUpperCase();
+    backend.textContent = storage;
+    backend.classList.toggle("is-s3", storage === "S3");
     detail.textContent = `${formatBytes(artifact.size)} · ${artifact.media_type}${artifact.primary ? " · PRIMARY" : ""}`;
+    item.dataset.backend = storage.toLowerCase();
     elements.artifactList.append(fragment);
   }
 }
+async function copyArtifactDirectLink(artifact, button) {
+  button.disabled = true;
+  try {
+    const result = await api(`/artifacts/${artifact.id}/direct-links`, {
+      method: "POST",
+      body: {},
+    });
+    const absoluteUrl = new URL(result.url, window.location.origin).href;
+    await copyText(absoluteUrl);
+    showToast(
+      "临时直链已复制",
+      `${(result.storage_backend || "local").toUpperCase()} · ${formatDateTime(result.expires_at)} 前有效，可交给 IDM/aria2。`,
+      "success",
+    );
+  } catch (error) {
+    showToast("直链生成失败", readableError(error), "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back for non-HTTPS or denied clipboard permissions.
+    }
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.className = "clipboard-fallback";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("浏览器拒绝写入剪贴板，请手动复制下载地址。");
+}
+
 
 async function cancelActiveJob() {
   const job = state.activeJob;
@@ -822,11 +876,21 @@ function renderHistory() {
     }
     const primary = job.artifacts?.find((artifact) => artifact.primary) || job.artifacts?.[0];
     if (job.status === "completed" && primary) {
+      detail.textContent = `${job.artifacts?.length || 0} FILES · ${(primary.storage_backend || "local").toUpperCase()}`;
+    }
+    if (job.status === "completed" && primary) {
       const download = document.createElement("a");
       download.href = primary.download_url;
-      download.download = "";
+      if ((primary.storage_backend || "local") === "local") download.download = "";
       download.textContent = "下载";
       actions.append(download);
+      if (state.config?.features?.direct_links) {
+        const direct = actionButton("直链", (event) => {
+          void copyArtifactDirectLink(primary, event.currentTarget);
+        });
+        direct.title = "复制免 Cookie 的短期签名下载地址";
+        actions.append(direct);
+      }
     }
     if (TERMINAL_STATES.has(job.status) && job.status !== "expired") {
       const purge = actionButton("清理", () => void purgeJob(job.id));
@@ -1074,6 +1138,7 @@ function phaseLabel(phase, status) {
     downloading: "接收数据",
     postprocessing: "ffmpeg 后处理",
     finalizing: "校验并登记文件",
+    uploading: "上传对象存储",
     cancelling: "正在取消",
     ready: "已就绪",
   };
@@ -1116,6 +1181,18 @@ function formatDate(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
   return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",

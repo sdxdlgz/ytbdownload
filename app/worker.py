@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import signal
 import traceback
-from pathlib import Path
 
 from app.config import get_settings
 from app.database import Database
@@ -47,31 +46,42 @@ def run_job(operation_id: str, service: YtDlpService, db: Database) -> int:
         db.complete_job(operation_id, ttl_hours=settings.artifact_ttl_hours)
         return 0
     except WorkerCancelled:
-        _cleanup_job(operation_id, settings.work_dir, settings.artifacts_dir, db)
+        _cleanup_job(operation_id, service, db)
         db.fail_job(operation_id, "CANCELLED", "任务已取消。", cancelled=True)
         return 1
     except ResourceLimitExceeded as exc:
-        _cleanup_job(operation_id, settings.work_dir, settings.artifacts_dir, db)
+        _cleanup_job(operation_id, service, db)
         db.fail_job(operation_id, "SIZE_LIMIT", str(exc))
         return 1
     except AppError as exc:
-        _cleanup_job(operation_id, settings.work_dir, settings.artifacts_dir, db)
+        _cleanup_job(operation_id, service, db)
         db.fail_job(operation_id, exc.code, exc.message)
         return 1
     except Exception:
         traceback.print_exc()
-        _cleanup_job(operation_id, settings.work_dir, settings.artifacts_dir, db)
+        _cleanup_job(operation_id, service, db)
         db.fail_job(operation_id, "INTERNAL_ERROR", "下载任务异常退出，请稍后重试。")
         return 1
 
 
-def _cleanup_job(job_id: str, work_root: Path, artifacts_root: Path, db: Database) -> None:
-    for path, root in ((work_root / job_id, work_root), (artifacts_root / job_id, artifacts_root)):
+def _cleanup_job(job_id: str, service: YtDlpService, db: Database) -> None:
+    settings = service.settings
+    try:
+        db.revoke_job_artifacts(job_id)
+    except Exception:
+        traceback.print_exc()
+    try:
+        service.artifact_storage.process_deletion_outbox(limit=100)
+    except Exception:
+        traceback.print_exc()
+    for path, root in (
+        (settings.work_dir / job_id, settings.work_dir),
+        (settings.artifacts_dir / job_id, settings.artifacts_dir),
+    ):
         try:
             safe_rmtree(path, root)
         except (OSError, RuntimeError):
             traceback.print_exc()
-    db.clear_artifacts(job_id)
 
 
 def build_parser() -> argparse.ArgumentParser:

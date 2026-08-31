@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 PYTHON := .venv/bin/python
 
-.PHONY: setup dev lint security test test-unit test-integration test-browser test-browser-real verify docker-up docker-down logs
+.PHONY: setup dev lint security test test-unit test-integration test-minio test-browser test-browser-real verify docker-up docker-down logs
 
 setup:
 	python3 -m venv .venv
@@ -9,7 +9,7 @@ setup:
 	$(PYTHON) -m pip install -e '.[test]'
 
 dev:
-	YTDLP_WEB_ENVIRONMENT=development YTDLP_WEB_DATA_DIR=./data $(PYTHON) -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+	YTDLP_WEB_ENVIRONMENT=development YTDLP_WEB_DATA_DIR=./data $(PYTHON) -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --no-access-log
 
 lint:
 	$(PYTHON) -m ruff check app tests
@@ -27,6 +27,9 @@ test-unit:
 
 test-integration:
 	$(PYTHON) -m pytest -q -m integration
+
+test-minio:
+	./scripts/test-minio.sh
 
 test-browser:
 	./scripts/test-browser.sh

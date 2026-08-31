@@ -304,3 +304,141 @@ sudo systemctl edit ytbdownload
 | Nginx 文件 404 | 确认 `X_ACCEL_REDIRECT=true`、alias 路径、www-data 组权限 |
 
 日志默认不会向 API 返回上游 URL、cookies 或 traceback；内部 worker 日志位于 `data/logs`，仍应视为敏感运维数据。
+
+---
+
+## 6. S3-compatible 对象存储与临时直链
+
+### 6.1 它什么时候会更快
+
+启用后首次任务路径为：
+
+```text
+来源平台 → VPS 下载/ffmpeg → S3 multipart 上传 → 用户从 S3 下载
+```
+
+因此 S3 不会缩短前半段，首次可下载时间还会增加一次上传；它能改善的是后续交付线路、减轻 VPS 出口流量，并让多个用户/重复下载复用对象。选择到目标用户网络更好的 region/endpoint 才可能显著提速。对中国大陆用户，应先从当地运营商实测对象存储的 100MB/1GB 下载、晚高峰丢包与 Range 多连接表现；地理距离和厂商名称都不能替代实测。
+
+| Provider | Endpoint / region 配置 | Address style | 注意 |
+|---|---|---|---|
+| AWS S3 | endpoint 留空，填写真实 AWS region | `auto`/`virtual` | 可用 IAM role；KMS 仅 AWS |
+| Cloudflare R2 | `https://<account>.r2.cloudflarestorage.com`，region `auto` | `path` | presigned 使用 S3 API endpoint |
+| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | `auto`/`virtual` | 使用 application key |
+| Wasabi | 对应 region S3 endpoint | `auto` | 关注最短存储计费规则 |
+| MinIO | 管理员配置的 URL，常用 region `us-east-1` | `path` | HTTP 仅可信内网测试并显式允许 |
+
+### 6.2 通用私有 bucket 配置
+
+```dotenv
+YTDLP_WEB_S3_ENABLED=true
+YTDLP_WEB_S3_BUCKET=my-private-media
+YTDLP_WEB_S3_REGION=ap-southeast-1
+YTDLP_WEB_S3_ENDPOINT_URL=
+YTDLP_WEB_S3_PREFIX=signal-artifacts
+YTDLP_WEB_S3_ADDRESSING_STYLE=auto
+
+YTDLP_WEB_S3_ACCESS_KEY_ID=<key>
+YTDLP_WEB_S3_SECRET_ACCESS_KEY=<secret>
+# 临时凭证才设置 SESSION_TOKEN
+YTDLP_WEB_S3_SESSION_TOKEN=
+
+YTDLP_WEB_S3_KEEP_LOCAL=false
+YTDLP_WEB_S3_FAILURE_MODE=required
+YTDLP_WEB_S3_DELETE_ON_EXPIRY=true
+YTDLP_WEB_S3_PRESIGN_TTL_SECONDS=7200
+YTDLP_WEB_S3_MULTIPART_THRESHOLD_MB=64
+YTDLP_WEB_S3_MULTIPART_CHUNKSIZE_MB=16
+YTDLP_WEB_S3_MAX_CONCURRENCY=2
+```
+
+- `KEEP_LOCAL=true`：S3 是主下载线路，但 presign 暂时失败时可回退 VPS 本地文件，代价是双份存储。
+- `KEEP_LOCAL=false`：全部对象 PUT+HEAD 校验并完成 SQLite 原子切换后才删本地副本。
+- `FAILURE_MODE=fallback`：任何上传失败都会为已计划 key 写 deletion outbox，并恢复完整本地产物集。
+- `FAILURE_MODE=required`：S3 失败则整个 job 失败，不暴露半套产物。
+- ETag 只作为 provider opaque metadata；应用 SHA-256 始终是内容完整性依据。
+
+R2 示例：
+
+```dotenv
+YTDLP_WEB_S3_ENABLED=true
+YTDLP_WEB_S3_BUCKET=media
+YTDLP_WEB_S3_REGION=auto
+YTDLP_WEB_S3_ENDPOINT_URL=https://ACCOUNT_ID.r2.cloudflarestorage.com
+YTDLP_WEB_S3_ADDRESSING_STYLE=path
+```
+
+MinIO 测试示例：
+
+```dotenv
+YTDLP_WEB_ENVIRONMENT=development
+YTDLP_WEB_S3_ENABLED=true
+YTDLP_WEB_S3_BUCKET=media
+YTDLP_WEB_S3_REGION=us-east-1
+YTDLP_WEB_S3_ENDPOINT_URL=http://127.0.0.1:9000
+YTDLP_WEB_S3_ALLOW_INSECURE_ENDPOINT=true
+YTDLP_WEB_S3_ADDRESSING_STYLE=path
+```
+
+生产 endpoint 默认必须是 HTTPS；S3 endpoint 是携带签名/凭证的管理员配置，绝不能由网页用户提供。可选 CA 文件使用 `YTDLP_WEB_S3_CA_BUNDLE`。
+
+### 6.3 最小权限与 lifecycle
+
+Bucket 保持 private，不配置公共读 ACL。建议将凭证限制到单个 bucket/prefix，仅授予：
+
+- `s3:PutObject`、`s3:GetObject`、`s3:DeleteObject`
+- multipart create/upload/list/complete/abort 所需权限
+- 可选 `s3:ListBucket`，condition 限制为配置 prefix
+- 只有启用 AWS KMS 时才授予对应 KMS 权限
+
+应用清理会先在 SQLite 事务中撤销 artifact/直链，并把 bucket/key/version 写入 durable deletion outbox，然后异步 DeleteObject；网络失败指数退避。仍应配置 bucket lifecycle 作为第二道保障，例如：
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "signal-artifact-expiry",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "signal-artifacts/"},
+      "Expiration": {"Days": 2},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 2},
+      "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}
+    }
+  ]
+}
+```
+
+Lifecycle 时间应略长于应用 TTL，避免正在使用的 artifact 被 provider 提前删除。版本化 bucket 必须同时清理 noncurrent versions/delete markers，否则 DeleteObject 可能只创建 delete marker 而仍产生账单。
+
+### 6.4 免 Cookie 临时直链
+
+```dotenv
+YTDLP_WEB_DIRECT_LINKS_ENABLED=true
+YTDLP_WEB_DIRECT_LINK_TTL_MINUTES=120
+YTDLP_WEB_DIRECT_LINK_MAX_TTL_MINUTES=1440
+# 可单独设置；空则使用强 APP_SECRET 做 domain-separated 派生
+YTDLP_WEB_DIRECT_LINK_SECRET=
+```
+
+页面产物旁的链形按钮会调用鉴权发行接口并复制：
+
+```text
+https://dl.example.com/d/<artifact-uuid>?expires=<unix>&signature=<hmac>
+```
+
+这个 URL：
+
+- 无需 session Cookie，适合 IDM/aria2；
+- 可重复发起 GET/HEAD/Range，直到过期；
+- LOCAL 由 Nginx/FileResponse 发送，S3 返回 method-specific `307`；
+- artifact 清理/DB row 撤销后立即 404；
+- 任何持有者在有效期内都拥有下载权，不要公开分享。
+
+生产 Nginx/Caddy 配置会跳过 `/d/*` access log，Uvicorn 也默认关闭 access log。开发服务器、上游 LB、浏览器历史和聊天记录仍可能保存 bearer URL；按 secret 对待。S3 presigned TTL 还会限制重定向后的最终 URL，有超大慢速文件时应同时调整 direct-link 与 presign TTL。
+
+### 6.5 Docker 与原生 secret
+
+Compose 的 `.env` 已会传递 S3 设置，文件必须 `chmod 600`。原生安装的 `/opt/ytbdownload/.env` 是 `root:ytbdownload 0640`。也可省略静态 access key，让 boto 使用 AWS 标准环境/instance role credential chain。
+
+如果 MinIO endpoint 位于私网，`install-egress-firewall.sh` 的私网阻断会拒绝它；不要粗暴关闭全部 SSRF 防护，应只为明确的 endpoint IP/端口添加最小 nftables allow rule。
+
+健康接口默认只报告 S3 已配置，不发网络请求；设置 `YTDLP_WEB_S3_HEALTHCHECK=true` 才会执行 HeadBucket，并可能要求额外 bucket 权限。`pending_deletions` 可用于监控远端清理积压。

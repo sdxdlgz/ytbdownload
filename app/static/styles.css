@@ -1935,7 +1935,7 @@ progress::-moz-progress-bar {
   display: grid;
   min-height: 66px;
   padding: 10px 13px;
-  grid-template-columns: 40px minmax(0, 1fr) 40px;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
   align-items: center;
   gap: 11px;
   border: 1px solid var(--line);
@@ -1949,22 +1949,55 @@ progress::-moz-progress-bar {
 }
 
 .artifact-icon,
-.artifact-action {
+.artifact-download,
+.artifact-link-button {
   display: grid;
   width: 36px;
   height: 36px;
   place-items: center;
   border: 1px solid var(--line);
+  background: transparent;
+  color: var(--paper);
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
 }
 
 .artifact-icon svg,
-.artifact-action svg {
+.artifact-download svg,
+.artifact-link-button svg {
   width: 17px;
   height: 17px;
 }
 
-.artifact-action {
+.artifact-download,
+.artifact-link-button {
   color: var(--signal);
+}
+
+.artifact-download:hover,
+.artifact-link-button:hover {
+  border-color: var(--signal);
+  background: var(--signal-wash);
+}
+
+.artifact-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.artifact-backend {
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.52rem;
+  font-style: normal;
+  letter-spacing: 0.08em;
+}
+
+.artifact-backend.is-s3 {
+  border-color: rgba(141, 219, 227, 0.55);
+  color: var(--sky);
 }
 
 .artifact-copy {
@@ -2518,6 +2551,16 @@ progress::-moz-progress-bar {
   display: grid;
   width: min(370px, calc(100vw - 40px));
   gap: 8px;
+  pointer-events: none;
+}
+
+.clipboard-fallback {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
   pointer-events: none;
 }
 

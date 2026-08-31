@@ -198,6 +198,29 @@ class SessionManager:
         return self.verify(request.cookies.get(SESSION_COOKIE))
 
 
+class ArtifactDirectLinkSigner:
+    """Issue reusable, short-lived bearer capabilities for artifact GET/HEAD requests."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.key = settings.direct_link_signing_key
+
+    def sign(self, artifact_id: str, sha256: str, expires: int) -> str:
+        payload = self._payload(artifact_id, sha256, expires)
+        signature = hmac.new(self.key, payload, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+
+    def verify(self, artifact_id: str, sha256: str, expires: int, signature: str) -> bool:
+        if not signature or len(signature) > 128:
+            return False
+        expected = self.sign(artifact_id, sha256, expires)
+        return hmac.compare_digest(signature, expected)
+
+    @staticmethod
+    def _payload(artifact_id: str, sha256: str, expires: int) -> bytes:
+        return f"artifact-direct-v1\n{artifact_id.lower()}\n{expires}\n{sha256.lower()}".encode()
+
+
 async def require_principal(request: Request) -> str:
     manager: SessionManager = request.app.state.session_manager
     if not manager.request_authenticated(request):

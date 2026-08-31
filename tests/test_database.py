@@ -39,6 +39,13 @@ def test_analysis_lifecycle_and_owner_scope(db: Database) -> None:
     assert db.queued_operation_count() == 0
 
 
+def test_idle_claim_does_not_compete_for_sqlite_writer_lock(db: Database) -> None:
+    with db.connect() as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        assert db.claim_next_operation() is None
+        writer.execute("ROLLBACK")
+
+
 def test_job_idempotency_progress_and_completion(db: Database) -> None:
     analysis = create_completed_analysis(db)
     choice = analysis["result"]["choices"][0]

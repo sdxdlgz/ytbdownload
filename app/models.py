@@ -91,9 +91,21 @@ class ArtifactPublic(BaseModel):
     media_type: str
     sha256: str
     primary: bool
+    storage_backend: Literal["local", "s3"] = "local"
+    local_available: bool = True
     created_at: datetime
     expires_at: datetime
     download_url: str
+
+
+class ArtifactDirectLinkCreateRequest(BaseModel):
+    ttl_minutes: int | None = Field(default=None, ge=1, le=10080)
+
+
+class ArtifactDirectLinkPublic(BaseModel):
+    url: str
+    expires_at: datetime
+    storage_backend: Literal["local", "s3"]
 
 
 class JobPublic(BaseModel):

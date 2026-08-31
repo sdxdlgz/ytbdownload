@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import os
 import subprocess
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +13,7 @@ from playwright.sync_api import expect, sync_playwright
 
 BASE_URL = "http://127.0.0.1:8766"
 ARTIFACT_DIR = Path("artifacts/browser-real")
+EXPECTED_BACKEND = os.environ.get("BROWSER_E2E_EXPECT_BACKEND", "").strip().lower()
 
 
 class SilentHandler(SimpleHTTPRequestHandler):
@@ -19,51 +22,13 @@ class SilentHandler(SimpleHTTPRequestHandler):
 
 
 def create_fixture(root: Path) -> tuple[ThreadingHTTPServer, Thread, str]:
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=15",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=660:sample_rate=44100",
-            "-t",
-            "1.1",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-shortest",
-            str(root / "sample.mp4"),
-        ],
-        check=True,
-        timeout=60,
-    )
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=0x182014:s=320x180",
-            "-frames:v",
-            "1",
-            str(root / "cover.jpg"),
-        ],
-        check=True,
-        timeout=30,
-    )
+    fixture_dir = Path(__file__).resolve().parent / "fixtures"
+    for encoded_name, output_name in (
+        ("sample.mp4.b64", "sample.mp4"),
+        ("cover.jpg.b64", "cover.jpg"),
+    ):
+        encoded = (fixture_dir / encoded_name).read_text(encoding="ascii")
+        (root / output_name).write_bytes(base64.b64decode(encoded, validate=True))
     server = ThreadingHTTPServer(("127.0.0.1", 0), partial(SilentHandler, directory=str(root)))
     port = server.server_address[1]
     (root / "index.html").write_text(
@@ -89,7 +54,11 @@ def run() -> None:
         try:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch(headless=True)
-                page = browser.new_page(viewport={"width": 1365, "height": 900})
+                context = browser.new_context(
+                    viewport={"width": 1365, "height": 900}, accept_downloads=True
+                )
+                page = context.new_page()
+                context.grant_permissions(["clipboard-read", "clipboard-write"], origin=BASE_URL)
                 page.on(
                     "console",
                     lambda message: (
@@ -104,32 +73,64 @@ def run() -> None:
                 page.get_by_role("button", name="解析链接").click()
 
                 expect(page.get_by_text("Real Browser Pipeline", exact=True)).to_be_visible(
-                    timeout=60_000
+                    timeout=120_000
                 )
                 expect(
                     page.locator("#choice-list .choice-copy strong", has_text="最佳画质")
                 ).to_be_visible()
                 page.get_by_role("button", name="开始传输").click()
+                expect(page.get_by_text("文件已经落地。", exact=True)).to_be_visible(
+                    timeout=180_000
+                )
 
-                video_link = page.locator("#artifact-list .artifact-item", has_text=".mp4")
-                expect(video_link).to_be_visible(timeout=90_000)
+                video_item = page.locator("#artifact-list .artifact-item", has_text=".mp4")
+                expect(video_item).to_be_visible(timeout=180_000)
+                video_download = video_item.locator(".artifact-download")
+                if EXPECTED_BACKEND:
+                    expect(video_item).to_have_attribute("data-backend", EXPECTED_BACKEND)
+                assert (video_download.get_attribute("download") or "").lower().endswith(".mp4")
                 with page.expect_download(timeout=30_000) as download_info:
-                    video_link.click()
+                    video_download.click()
+                video_result = download_info.value
+                failure = video_result.failure()
+                assert failure is None, {
+                    "failure": failure,
+                    "suggested_filename": video_result.suggested_filename,
+                }
                 video_path = ARTIFACT_DIR / "browser-downloaded.mp4"
-                download_info.value.save_as(video_path)
+                video_result.save_as(video_path)
                 assert probe(video_path, "v:0") == "video"
+
+                video_item.locator(".artifact-link-button").click()
+                expect(page.get_by_text("临时直链已复制", exact=True)).to_be_visible()
+                direct_url = page.evaluate("navigator.clipboard.readText()")
+                direct_client = playwright.request.new_context()
+                direct_response = direct_client.get(direct_url, headers={"Range": "bytes=0-3"})
+                assert direct_response.status == 206
+                assert len(direct_response.body()) == 4
+                direct_client.dispose()
 
                 page.get_by_role("tab", name="封面").click()
                 expect(
                     page.locator("#choice-list .choice-copy strong", has_text="原始封面")
                 ).to_be_visible()
                 page.get_by_role("button", name="开始传输").click()
-                image_link = page.locator("#artifact-list .artifact-item", has_text=".jpg")
-                expect(image_link).to_be_visible(timeout=90_000)
+                image_item = page.locator("#artifact-list .artifact-item", has_text=".jpg")
+                expect(image_item).to_be_visible(timeout=180_000)
+                image_download = image_item.locator(".artifact-download")
+                if EXPECTED_BACKEND:
+                    expect(image_item).to_have_attribute("data-backend", EXPECTED_BACKEND)
+                assert (image_download.get_attribute("download") or "").lower().endswith(".jpg")
                 with page.expect_download(timeout=30_000) as download_info:
-                    image_link.click()
+                    image_download.click()
+                image_result = download_info.value
+                failure = image_result.failure()
+                assert failure is None, {
+                    "failure": failure,
+                    "suggested_filename": image_result.suggested_filename,
+                }
                 image_path = ARTIFACT_DIR / "browser-downloaded.jpg"
-                download_info.value.save_as(image_path)
+                image_result.save_as(image_path)
                 assert image_path.read_bytes().startswith(b"\xff\xd8")
 
                 page.screenshot(path=str(ARTIFACT_DIR / "real-completed.png"), full_page=True)
@@ -146,6 +147,7 @@ def probe(path: Path, selector: str) -> str:
     result = subprocess.run(
         [
             "ffprobe",
+            "-nostdin",
             "-v",
             "error",
             "-select_streams",

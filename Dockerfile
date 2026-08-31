@@ -33,7 +33,7 @@ COPY app ./app
 RUN /opt/venv/bin/pip install .
 
 FROM python:3.12-slim-bookworm AS runtime
-ARG APP_VERSION=1.0.0
+ARG APP_VERSION=1.1.0
 LABEL org.opencontainers.image.title="Signal yt-dlp Web" \
       org.opencontainers.image.description="Secure self-hosted web interface for yt-dlp" \
       org.opencontainers.image.source="https://github.com/sdxdlgz/ytbdownload" \

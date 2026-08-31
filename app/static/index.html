@@ -348,7 +348,8 @@
           <li><span>01</span>最高画质与分辨率上限预设</li>
           <li><span>02</span>精确格式、字幕与播放列表</li>
           <li><span>03</span>原图 / JPG / PNG 封面输出</li>
-          <li><span>04</span>可选 cookies 处理登录媒体</li>
+          <li><span>04</span>S3 / R2 / B2 / MinIO 与临时签名直链</li>
+          <li><span>05</span>可选 cookies 处理登录媒体</li>
         </ul>
       </div>
     </section>
@@ -361,7 +362,7 @@
     </div>
     <p>仅下载你有权保存的内容。本站与 YouTube 及其他平台无隶属关系。</p>
     <div class="footer-links">
-      <span id="footer-version">WEB / 1.0.0</span>
+      <span id="footer-version">WEB / 1.1.0</span>
       <a href="https://github.com/sdxdlgz/ytbdownload" target="_blank" rel="noreferrer">
         <svg aria-hidden="true"><use href="/static/icons.svg#github"></use></svg> SOURCE
       </a>
@@ -418,11 +419,15 @@
   </template>
 
   <template id="artifact-template">
-    <a class="artifact-item">
+    <div class="artifact-item">
       <span class="artifact-icon"><svg aria-hidden="true"><use href="/static/icons.svg#file"></use></svg></span>
       <span class="artifact-copy"><strong></strong><small></small></span>
-      <span class="artifact-action"><svg aria-hidden="true"><use href="/static/icons.svg#download"></use></svg></span>
-    </a>
+      <span class="artifact-actions">
+        <em class="artifact-backend">LOCAL</em>
+        <a class="artifact-download" aria-label="下载文件"><svg aria-hidden="true"><use href="/static/icons.svg#download"></use></svg></a>
+        <button class="artifact-link-button" type="button" aria-label="复制临时直链"><svg aria-hidden="true"><use href="/static/icons.svg#link"></use></svg></button>
+      </span>
+    </div>
   </template>
 
   <template id="history-template">

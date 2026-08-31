@@ -18,6 +18,7 @@ from uuid import uuid4
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
+from app.artifact_storage import S3ArtifactStorage
 from app.config import Settings
 from app.database import Database
 from app.errors import AppError, ResourceLimitExceeded, WorkerCancelled
@@ -147,10 +148,17 @@ class ProgressReporter:
 
 
 class YtDlpService:
-    def __init__(self, settings: Settings, db: Database) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        db: Database,
+        *,
+        artifact_storage: S3ArtifactStorage | None = None,
+    ) -> None:
         self.settings = settings
         self.db = db
         self.url_validator = URLValidator(settings)
+        self.artifact_storage = artifact_storage or S3ArtifactStorage(settings, db)
 
     def analyze(self, url: str, *, playlist: bool) -> dict[str, Any]:
         validated = self.url_validator.validate_sync(url)
@@ -230,7 +238,7 @@ class YtDlpService:
         if self.db.is_cancel_requested(job_id):
             raise WorkerCancelled("任务已取消。")
         self.db.update_job_progress(job_id, phase="finalizing", progress=98.0)
-        return self._finalize_artifacts(
+        artifacts = self._finalize_artifacts(
             job_id,
             work_dir,
             artifact_dir,
@@ -238,6 +246,7 @@ class YtDlpService:
             choice=choice,
             playlist=playlist,
         )
+        return self.artifact_storage.publish_job_artifacts(job_id, artifacts)
 
     def _common_options(self, logger: QuietLogger) -> dict[str, Any]:
         options: dict[str, Any] = {

@@ -143,6 +143,8 @@ def job_record(status: str, progress: float) -> dict:
                 "media_type": "audio/mpeg",
                 "sha256": "a" * 64,
                 "primary": True,
+                "storage_backend": "s3",
+                "local_available": False,
                 "created_at": iso(),
                 "expires_at": iso(12),
                 "download_url": f"/api/v1/artifacts/{ARTIFACT_ID}",
@@ -211,7 +213,19 @@ def install_mock_flow(page: Page) -> None:
             current_job["value"] = job_record("completed", 100)
         fulfill_json(route, current_job["value"])
 
+    def direct_links(route: Route) -> None:
+        fulfill_json(
+            route,
+            {
+                "url": f"/d/{ARTIFACT_ID}?expires=2000000000&signature=test-signature",
+                "expires_at": iso(2),
+                "storage_backend": "s3",
+            },
+            201,
+        )
+
     page.route(f"{BASE_URL}/api/v1/analyses", analyses)
+    page.route(f"{BASE_URL}/api/v1/artifacts/{ARTIFACT_ID}/direct-links", direct_links)
     page.route(f"{BASE_URL}/api/v1/jobs**", jobs)
 
 
@@ -228,6 +242,7 @@ def run() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         desktop = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+        desktop.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=BASE_URL)
         desktop.on(
             "console",
             lambda message: (
@@ -272,6 +287,14 @@ def run() -> None:
         desktop.get_by_role("button", name="开始传输").click()
         expect(desktop.get_by_text("文件已经落地。", exact=True)).to_be_visible(timeout=10_000)
         expect(desktop.get_by_text("A Field Guide to Signals.mp3", exact=True)).to_be_visible()
+        expect(desktop.locator("#artifact-list .artifact-backend", has_text="S3")).to_be_visible()
+        expect(desktop.locator("#artifact-list .artifact-download")).to_have_attribute(
+            "download", "A Field Guide to Signals.mp3"
+        )
+        desktop.get_by_role("button", name="复制 A Field Guide to Signals.mp3 的临时直链").click()
+        expect(desktop.get_by_text("临时直链已复制", exact=True)).to_be_visible()
+        copied = desktop.evaluate("navigator.clipboard.readText()")
+        assert copied.startswith(f"{BASE_URL}/d/{ARTIFACT_ID}?")
         assert_no_horizontal_overflow(desktop)
         desktop.screenshot(path=str(ARTIFACT_DIR / "completed-desktop.png"), full_page=True)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 import sys
@@ -10,9 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
+from app.artifact_storage import S3ArtifactStorage
 from app.config import Settings
 from app.database import Database, status_is_terminal
 from app.yt_service import safe_rmtree
+
+LOGGER = logging.getLogger("signal.dispatcher")
 
 
 @dataclass
@@ -29,20 +33,33 @@ class RunningOperation:
 class Dispatcher:
     """Lease queued SQLite operations and supervise isolated worker process groups."""
 
-    def __init__(self, settings: Settings, db: Database) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        db: Database,
+        *,
+        artifact_storage: S3ArtifactStorage | None = None,
+    ) -> None:
         self.settings = settings
         self.db = db
+        self.artifact_storage = artifact_storage or S3ArtifactStorage(settings, db)
         self.running: dict[tuple[str, str], RunningOperation] = {}
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._last_cleanup = 0.0
+        self._last_storage_cleanup = 0.0
         self.project_root = Path(__file__).resolve().parents[1]
 
     async def start(self) -> None:
         interrupted = self.db.reconcile_interrupted()
         for kind, operation_id in interrupted:
             if kind == "job":
+                try:
+                    self.db.revoke_job_artifacts(operation_id)
+                except Exception:
+                    LOGGER.exception("Failed to revoke interrupted job artifacts %s", operation_id)
                 self._remove_job_directories(operation_id)
+        await asyncio.to_thread(self._process_storage_deletions_safely, limit=100)
         self._stop_event.clear()
         self._task = asyncio.create_task(self._run_loop(), name="yt-dlp-dispatcher")
 
@@ -69,6 +86,9 @@ class Dispatcher:
                 if now - self._last_cleanup >= self.settings.cleanup_interval_seconds:
                     await asyncio.to_thread(self.cleanup)
                     self._last_cleanup = now
+                if now - self._last_storage_cleanup >= 30:
+                    await asyncio.to_thread(self._process_storage_deletions_safely, limit=50)
+                    self._last_storage_cleanup = now
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(
                         self._stop_event.wait(), timeout=self.settings.worker_poll_seconds
@@ -78,7 +98,12 @@ class Dispatcher:
 
     async def _fill_available_slots(self) -> None:
         while len(self.running) < self.settings.max_concurrent_operations:
-            claimed = await asyncio.to_thread(self.db.claim_next_operation)
+            try:
+                claimed = await asyncio.to_thread(self.db.claim_next_operation)
+            except Exception:
+                if not self._stop_event.is_set():
+                    LOGGER.exception("Failed to claim the next queued operation")
+                return
             if not claimed:
                 return
             kind, operation_id = claimed
@@ -192,8 +217,7 @@ class Dispatcher:
                     code,
                     message,
                 )
-            await asyncio.to_thread(self._remove_job_directories, operation.operation_id)
-            await asyncio.to_thread(self.db.clear_artifacts, operation.operation_id)
+            await asyncio.to_thread(self._revoke_failed_job_artifacts, operation.operation_id)
 
     async def _terminate_all(self) -> None:
         if not self.running:
@@ -218,8 +242,7 @@ class Dispatcher:
                 self.db.fail_job(
                     operation.operation_id, "SERVER_SHUTDOWN", "服务关闭，下载任务已中止。"
                 )
-                self._remove_job_directories(operation.operation_id)
-                self.db.clear_artifacts(operation.operation_id)
+                self._revoke_failed_job_artifacts(operation.operation_id)
         self.running.clear()
 
     @staticmethod
@@ -238,20 +261,21 @@ class Dispatcher:
 
     def cleanup(self) -> None:
         for job_id in self.db.expired_jobs():
-            self.db.mark_job_expired(job_id)
-            self._remove_job_directories(job_id)
+            if self.db.mark_job_expired(job_id):
+                self._remove_job_directories(job_id)
 
         total_size = directory_size(self.settings.artifacts_dir)
         if total_size > self.settings.max_storage_bytes:
-            for job_id in self.db.oldest_completed_jobs():
+            for job_id in self.db.oldest_completed_jobs_with_local_artifacts():
                 path = self.settings.artifacts_dir / job_id
                 job_size = directory_size(path)
-                self.db.mark_job_expired(job_id)
-                self._remove_job_directories(job_id)
-                total_size = max(0, total_size - job_size)
+                if self.db.mark_job_expired(job_id):
+                    self._remove_job_directories(job_id)
+                    total_size = max(0, total_size - job_size)
                 if total_size <= int(self.settings.max_storage_bytes * 0.9):
                     break
 
+        self._process_storage_deletions_safely(limit=100)
         self.db.expire_analyses()
         cutoff = time.time() - max(86400, self.settings.artifact_ttl_hours * 7200)
         for log_file in self.settings.logs_dir.glob("*.log"):
@@ -260,8 +284,23 @@ class Dispatcher:
                     log_file.unlink()
 
     def purge_job(self, job_id: str) -> None:
-        self.db.mark_job_expired(job_id)
+        if self.db.mark_job_expired(job_id):
+            self._remove_job_directories(job_id)
+        self._process_storage_deletions_safely(limit=100)
+
+    def _revoke_failed_job_artifacts(self, job_id: str) -> None:
+        try:
+            self.db.revoke_job_artifacts(job_id)
+        except Exception:
+            LOGGER.exception("Failed to revoke artifact metadata for job %s", job_id)
         self._remove_job_directories(job_id)
+        self._process_storage_deletions_safely(limit=100)
+
+    def _process_storage_deletions_safely(self, *, limit: int) -> None:
+        try:
+            self.artifact_storage.process_deletion_outbox(limit=limit)
+        except Exception:
+            LOGGER.exception("Failed to process the S3 deletion outbox")
 
     def _remove_job_directories(self, job_id: str) -> None:
         for path, root in (

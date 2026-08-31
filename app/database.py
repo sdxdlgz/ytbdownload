@@ -122,6 +122,14 @@ class Database:
                     sha256 TEXT NOT NULL,
                     media_type TEXT NOT NULL,
                     is_primary INTEGER NOT NULL DEFAULT 0,
+                    storage_backend TEXT NOT NULL DEFAULT 'local',
+                    storage_state TEXT NOT NULL DEFAULT 'ready',
+                    object_bucket TEXT,
+                    object_key TEXT,
+                    object_etag TEXT,
+                    object_version_id TEXT,
+                    local_available INTEGER NOT NULL DEFAULT 1,
+                    uploaded_at TEXT,
                     created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     UNIQUE(job_id, relpath)
@@ -131,8 +139,58 @@ class Database:
                     ON artifacts(job_id, is_primary DESC, created_at);
                 CREATE INDEX IF NOT EXISTS idx_artifacts_expiry
                     ON artifacts(expires_at);
+                CREATE TABLE IF NOT EXISTS storage_deletions (
+                    id TEXT PRIMARY KEY,
+                    backend TEXT NOT NULL,
+                    bucket TEXT NOT NULL,
+                    object_key TEXT NOT NULL,
+                    version_id TEXT NOT NULL DEFAULT '',
+                    job_id TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    not_before TEXT NOT NULL,
+                    lease_until TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(backend, bucket, object_key, version_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_storage_deletions_due
+                    ON storage_deletions(not_before, lease_until);
                 """
             )
+            self._migrate_artifact_storage(connection)
+
+    @staticmethod
+    def _migrate_artifact_storage(connection: sqlite3.Connection) -> None:
+        columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(artifacts)")}
+        additions = {
+            "storage_backend": "TEXT NOT NULL DEFAULT 'local'",
+            "storage_state": "TEXT NOT NULL DEFAULT 'ready'",
+            "object_bucket": "TEXT",
+            "object_key": "TEXT",
+            "object_etag": "TEXT",
+            "object_version_id": "TEXT",
+            "local_available": "INTEGER NOT NULL DEFAULT 1",
+            "uploaded_at": "TEXT",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                # Names/declarations are fixed above and never contain request data.
+                connection.execute(f"ALTER TABLE artifacts ADD COLUMN {name} {declaration}")  # nosec B608
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_remote_object
+            ON artifacts(object_bucket, object_key)
+            WHERE object_key IS NOT NULL
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_artifacts_local_jobs
+            ON artifacts(job_id, local_available)
+            """
+        )
+        connection.execute("PRAGMA user_version = 2")
 
     def ping(self) -> bool:
         with self.connect() as connection:
@@ -340,27 +398,30 @@ class Database:
 
     def claim_next_operation(self) -> tuple[str, str] | None:
         """Atomically lease the oldest queued analysis or job."""
-        with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+
+        def oldest_queued(connection: sqlite3.Connection) -> tuple[str, sqlite3.Row] | None:
             analysis = connection.execute(
-                "SELECT id, created_at FROM analyses WHERE status = 'queued' ORDER BY created_at LIMIT 1"
+                "SELECT id, created_at FROM analyses WHERE status = 'queued' "
+                "ORDER BY created_at LIMIT 1"
             ).fetchone()
             job = connection.execute(
-                "SELECT id, created_at FROM jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1"
+                "SELECT id, created_at FROM jobs WHERE status = 'queued' "
+                "ORDER BY created_at LIMIT 1"
             ).fetchone()
-            candidate: tuple[str, sqlite3.Row] | None = None
-            if analysis and job:
-                candidate = (
-                    "analysis",
-                    analysis if analysis["created_at"] <= job["created_at"] else job,
-                )
-                if candidate[1] is job:
-                    candidate = ("job", job)
-            elif analysis:
-                candidate = ("analysis", analysis)
-            elif job:
-                candidate = ("job", job)
-            if not candidate:
+            if analysis and (not job or analysis["created_at"] <= job["created_at"]):
+                return "analysis", analysis
+            if job:
+                return "job", job
+            return None
+
+        with self.connect() as connection:
+            # Avoid taking SQLite's only writer lock on every idle dispatcher poll.
+            # A second lookup inside BEGIN IMMEDIATE keeps the lease atomic if a row exists.
+            if oldest_queued(connection) is None:
+                return None
+            connection.execute("BEGIN IMMEDIATE")
+            candidate = oldest_queued(connection)
+            if candidate is None:
                 connection.execute("COMMIT")
                 return None
 
@@ -465,10 +526,20 @@ class Database:
         expiry = iso_after(hours=ttl_hours)
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            ready_count = connection.execute(
+                """
+                SELECT COUNT(*) FROM artifacts
+                WHERE job_id = ? AND storage_state = 'ready'
+                """,
+                (job_id,),
+            ).fetchone()[0]
+            if ready_count < 1:
+                connection.execute("ROLLBACK")
+                raise RuntimeError("job cannot complete without a ready artifact")
             connection.execute(
                 "UPDATE artifacts SET expires_at = ? WHERE job_id = ?", (expiry, job_id)
             )
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE jobs SET status = 'completed', phase = 'ready', progress = 100,
                     error_code = NULL, error_message = NULL, worker_pid = NULL,
@@ -477,6 +548,9 @@ class Database:
                 """,
                 (now, now, expiry, job_id),
             )
+            if cursor.rowcount != 1:
+                connection.execute("ROLLBACK")
+                raise RuntimeError("job completion transition failed")
             connection.execute("COMMIT")
 
     def fail_job(self, job_id: str, code: str, message: str, *, cancelled: bool = False) -> None:
@@ -595,9 +669,184 @@ class Database:
             ).fetchall()
         return [self._artifact_row(row) for row in rows]
 
-    def clear_artifacts(self, job_id: str) -> None:
+    def stage_artifact_upload(
+        self, artifact_id: str, *, job_id: str, bucket: str, object_key: str
+    ) -> dict[str, Any]:
         with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE artifacts
+                SET storage_state = 'uploading', object_bucket = ?, object_key = ?,
+                    object_etag = NULL, object_version_id = NULL, uploaded_at = NULL
+                WHERE id = ? AND job_id = ? AND storage_backend = 'local'
+                """,
+                (bucket, object_key, artifact_id, job_id),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError("artifact could not be staged for upload")
+        return self.get_artifact(artifact_id)  # type: ignore[return-value]
+
+    def record_artifact_upload_result(
+        self, artifact_id: str, *, etag: str | None, version_id: str | None
+    ) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE artifacts
+                SET object_etag = ?, object_version_id = ?
+                WHERE id = ? AND storage_state = 'uploading' AND object_key IS NOT NULL
+                """,
+                (etag, version_id, artifact_id),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError("staged artifact disappeared before upload verification")
+
+    def promote_job_artifacts_to_s3(
+        self, job_id: str, artifact_ids: list[str], *, keep_local: bool
+    ) -> None:
+        expected = set(artifact_ids)
+        now = iso_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT id FROM artifacts
+                WHERE job_id = ? AND storage_state = 'uploading'
+                  AND object_bucket IS NOT NULL AND object_key IS NOT NULL
+                """,
+                (job_id,),
+            ).fetchall()
+            actual = {str(row["id"]) for row in rows}
+            if actual != expected or not expected:
+                connection.execute("ROLLBACK")
+                raise RuntimeError("not every job artifact completed S3 upload")
+            updated = 0
+            for artifact_id in artifact_ids:
+                cursor = connection.execute(
+                    """
+                    UPDATE artifacts
+                    SET storage_backend = 's3', storage_state = 'ready',
+                        local_available = ?, uploaded_at = ?
+                    WHERE id = ? AND job_id = ? AND storage_state = 'uploading'
+                    """,
+                    (int(keep_local), now, artifact_id, job_id),
+                )
+                updated += cursor.rowcount
+            if updated != len(artifact_ids):
+                connection.execute("ROLLBACK")
+                raise RuntimeError("S3 artifact promotion was incomplete")
+            connection.execute("COMMIT")
+
+    def fallback_job_artifacts_to_local(self, job_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT * FROM artifacts WHERE job_id = ? AND object_key IS NOT NULL",
+                (job_id,),
+            ).fetchall()
+            self._enqueue_remote_deletions(connection, rows)
+            connection.execute(
+                """
+                UPDATE artifacts
+                SET storage_backend = 'local', storage_state = 'ready',
+                    object_bucket = NULL, object_key = NULL, object_etag = NULL,
+                    object_version_id = NULL, local_available = 1, uploaded_at = NULL
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            )
+            connection.execute("COMMIT")
+
+    def revoke_job_artifacts(self, job_id: str) -> int:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT * FROM artifacts WHERE job_id = ?", (job_id,)
+            ).fetchall()
+            queued = self._enqueue_remote_deletions(connection, rows)
             connection.execute("DELETE FROM artifacts WHERE job_id = ?", (job_id,))
+            connection.execute("COMMIT")
+        return queued
+
+    @staticmethod
+    def _enqueue_remote_deletions(connection: sqlite3.Connection, rows: list[sqlite3.Row]) -> int:
+        queued = 0
+        now = iso_now()
+        for row in rows:
+            bucket = row["object_bucket"]
+            object_key = row["object_key"]
+            if not bucket or not object_key:
+                continue
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO storage_deletions (
+                    id, backend, bucket, object_key, version_id, job_id,
+                    not_before, created_at
+                ) VALUES (?, 's3', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    bucket,
+                    object_key,
+                    (row["object_version_id"] or ""),
+                    row["job_id"],
+                    now,
+                    now,
+                ),
+            )
+            queued += cursor.rowcount
+        return queued
+
+    def claim_storage_deletions(
+        self, *, limit: int = 50, lease_seconds: int = 60
+    ) -> list[dict[str, Any]]:
+        now = iso_now()
+        lease_until = iso_after(seconds=lease_seconds)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT * FROM storage_deletions
+                WHERE not_before <= ? AND (lease_until IS NULL OR lease_until < ?)
+                ORDER BY created_at LIMIT ?
+                """,
+                (now, now, limit),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    """
+                    UPDATE storage_deletions
+                    SET lease_until = ?, attempts = attempts + 1
+                    WHERE id = ?
+                    """,
+                    (lease_until, row["id"]),
+                )
+            connection.execute("COMMIT")
+        return [dict(row) for row in rows]
+
+    def acknowledge_storage_deletion(self, deletion_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM storage_deletions WHERE id = ?", (deletion_id,))
+
+    def fail_storage_deletion(
+        self, deletion_id: str, *, message: str, retry_after_seconds: int
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE storage_deletions
+                SET last_error = ?, not_before = ?, lease_until = NULL
+                WHERE id = ?
+                """,
+                (message[:500], iso_after(seconds=retry_after_seconds), deletion_id),
+            )
+
+    def pending_storage_deletion_count(self) -> int:
+        with self.connect() as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM storage_deletions").fetchone()[0])
+
+    def clear_artifacts(self, job_id: str) -> None:
+        self.revoke_job_artifacts(job_id)
 
     def reconcile_interrupted(self) -> list[tuple[str, str]]:
         """Mark operations left running by a previous API process as failed."""
@@ -647,29 +896,43 @@ class Database:
             ).fetchall()
         return [str(row["id"]) for row in rows]
 
-    def oldest_completed_jobs(self) -> list[str]:
+    def oldest_completed_jobs_with_local_artifacts(self) -> list[str]:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id FROM jobs WHERE status = 'completed'
-                ORDER BY completed_at ASC
+                SELECT j.id FROM jobs AS j
+                WHERE j.status = 'completed'
+                  AND EXISTS (
+                    SELECT 1 FROM artifacts AS a
+                    WHERE a.job_id = j.id AND a.local_available = 1
+                  )
+                ORDER BY j.completed_at ASC
                 """
             ).fetchall()
         return [str(row["id"]) for row in rows]
 
-    def mark_job_expired(self, job_id: str) -> None:
+    def mark_job_expired(self, job_id: str) -> bool:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if not row or row["status"] in {"running", "postprocessing", "cancelling"}:
+                connection.execute("ROLLBACK")
+                return False
+            artifacts = connection.execute(
+                "SELECT * FROM artifacts WHERE job_id = ?", (job_id,)
+            ).fetchall()
+            self._enqueue_remote_deletions(connection, artifacts)
             connection.execute("DELETE FROM artifacts WHERE job_id = ?", (job_id,))
             connection.execute(
                 """
                 UPDATE jobs SET status = 'expired', phase = 'expired',
                     worker_pid = NULL, updated_at = ?
-                WHERE id = ? AND status NOT IN ('running', 'postprocessing', 'cancelling')
+                WHERE id = ?
                 """,
                 (iso_now(), job_id),
             )
             connection.execute("COMMIT")
+        return True
 
     def expire_analyses(self) -> int:
         with self.connect() as connection:
@@ -707,6 +970,7 @@ class Database:
     def _artifact_row(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item["primary"] = bool(item.pop("is_primary"))
+        item["local_available"] = bool(item.get("local_available", 1))
         return item
 
 

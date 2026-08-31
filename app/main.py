@@ -4,7 +4,7 @@ import logging
 import platform
 import shutil
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.artifact_storage import S3ArtifactStorage
 from app.config import Settings, get_settings
 from app.database import Database
 from app.dispatcher import Dispatcher, directory_size
@@ -26,6 +27,8 @@ from app.errors import AppError
 from app.models import (
     AnalysisCreateRequest,
     AnalysisPublic,
+    ArtifactDirectLinkCreateRequest,
+    ArtifactDirectLinkPublic,
     HealthPublic,
     JobCreateRequest,
     JobPublic,
@@ -35,6 +38,7 @@ from app.models import (
 )
 from app.security import (
     SESSION_COOKIE,
+    ArtifactDirectLinkSigner,
     SecurityHeadersMiddleware,
     SessionManager,
     SlidingWindowRateLimiter,
@@ -45,7 +49,7 @@ from app.security import (
     validate_same_origin,
 )
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX_FILE = STATIC_DIR / "index.html"
 LOGGER = logging.getLogger("signal.web")
@@ -56,8 +60,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings.ensure_directories()
     database = Database(settings.database_path)
     database.initialize()
-    dispatcher = Dispatcher(settings, database)
+    artifact_storage = S3ArtifactStorage(settings, database)
+    dispatcher = Dispatcher(settings, database, artifact_storage=artifact_storage)
     session_manager = SessionManager(settings)
+    direct_link_signer = ArtifactDirectLinkSigner(settings)
     limiter = SlidingWindowRateLimiter()
     url_validator = URLValidator(settings)
 
@@ -81,6 +87,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.db = database
     app.state.dispatcher = dispatcher
+    app.state.artifact_storage = artifact_storage
+    app.state.direct_link_signer = direct_link_signer
     app.state.session_manager = session_manager
     app.state.rate_limiter = limiter
     app.state.url_validator = url_validator
@@ -166,12 +174,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/health/ready", response_model=HealthPublic, tags=["health"])
     async def health_ready(response: Response) -> dict[str, Any]:
-        checks = readiness_checks(settings, database)
+        checks = await asyncio_to_thread(readiness_checks, settings, database, artifact_storage)
         essential_ok = all(checks[key]["ok"] for key in ("database", "storage", "ffmpeg"))
         if not essential_ok:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {
-            "status": "ok" if essential_ok and checks["javascript_runtime"]["ok"] else "degraded",
+            "status": (
+                "ok"
+                if essential_ok
+                and checks["javascript_runtime"]["ok"]
+                and checks["object_storage"]["ok"]
+                else "degraded"
+            ),
             "version": APP_VERSION,
             "checks": checks,
         }
@@ -191,15 +205,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "subtitles": True,
                 "cancellation": True,
                 "range_downloads": True,
+                "direct_links": settings.direct_links_enabled,
+                "object_storage": settings.s3_enabled,
             },
             "limits": {
                 "max_filesize_mb": settings.max_filesize_mb,
                 "max_duration_seconds": settings.max_duration_seconds,
                 "max_playlist_items": settings.max_playlist_items,
                 "artifact_ttl_hours": settings.artifact_ttl_hours,
+                "direct_link_ttl_minutes": settings.direct_link_ttl_minutes,
+                "direct_link_max_ttl_minutes": settings.direct_link_max_ttl_minutes,
                 "max_concurrent_operations": settings.max_concurrent_operations,
             },
             "capabilities": capabilities,
+            "delivery": {
+                "default_backend": "s3" if settings.s3_enabled else "local",
+                "s3_enabled": settings.s3_enabled,
+                "s3_keep_local": settings.s3_keep_local if settings.s3_enabled else True,
+                "s3_failure_mode": settings.s3_failure_mode if settings.s3_enabled else None,
+                "direct_links_enabled": settings.direct_links_enabled,
+            },
             "featured_platforms": [
                 "YouTube",
                 "Bilibili",
@@ -410,16 +435,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             updated = record
         return job_public(updated, request.state.request_id)
 
-    @app.api_route("/api/v1/artifacts/{artifact_id}", methods=["GET", "HEAD"], tags=["downloads"])
-    async def download_artifact(
-        artifact_id: UUID,
-        principal: Annotated[str, Depends(require_principal)],
-    ) -> Response:
-        artifact = await asyncio_to_thread(database.get_artifact, str(artifact_id), owner=principal)
-        if not artifact or artifact.get("job_status") != "completed":
+    def require_ready_artifact(
+        artifact: dict[str, Any] | None, *, hide_expiry: bool = False
+    ) -> dict[str, Any]:
+        if (
+            not artifact
+            or artifact.get("job_status") != "completed"
+            or artifact.get("storage_state", "ready") != "ready"
+        ):
             raise AppError("NOT_FOUND", "下载文件不存在或已过期。", status_code=404)
         if datetime.fromisoformat(artifact["expires_at"]) <= datetime.now(UTC):
+            if hide_expiry:
+                raise AppError("NOT_FOUND", "下载文件不存在或已过期。", status_code=404)
             raise AppError("ARTIFACT_EXPIRED", "下载文件已过期。", status_code=410)
+        return artifact
+
+    async def deliver_artifact(
+        artifact: dict[str, Any], *, method: str, ttl_seconds: int
+    ) -> Response:
+        headers = {
+            "Cache-Control": "private, no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Artifact-SHA256": artifact["sha256"],
+            "Accept-Ranges": "bytes",
+        }
+        expires_at = datetime.fromisoformat(artifact["expires_at"])
+        artifact_remaining = max(1, int((expires_at - datetime.now(UTC)).total_seconds()))
+        if artifact.get("storage_backend") == "s3":
+            try:
+                remote_url = await asyncio_to_thread(
+                    artifact_storage.presign,
+                    artifact,
+                    method="HEAD" if method == "HEAD" else "GET",
+                    ttl_seconds=min(ttl_seconds, artifact_remaining),
+                )
+                return Response(
+                    status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+                    headers={**headers, "Location": remote_url},
+                )
+            except AppError:
+                if not artifact.get("local_available"):
+                    raise
+
+        if not artifact.get("local_available", True):
+            raise AppError("NOT_FOUND", "下载文件不存在或已过期。", status_code=404)
         relative = Path(artifact["relpath"])
         file_path = (settings.artifacts_dir / relative).resolve()
         artifact_root = settings.artifacts_dir.resolve()
@@ -429,11 +488,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             or not file_path.is_file()
         ):
             raise AppError("NOT_FOUND", "下载文件不存在或已过期。", status_code=404)
-        headers = {
-            "Cache-Control": "private, no-store",
-            "X-Artifact-SHA256": artifact["sha256"],
-            "Accept-Ranges": "bytes",
-        }
         if settings.x_accel_redirect:
             internal_uri = f"{settings.x_accel_prefix.rstrip('/')}/{quote(relative.as_posix())}"
             headers["X-Accel-Redirect"] = internal_uri
@@ -446,6 +500,87 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             filename=artifact["filename"],
             headers=headers,
         )
+
+    @app.api_route("/api/v1/artifacts/{artifact_id}", methods=["GET", "HEAD"], tags=["downloads"])
+    async def download_artifact(
+        request: Request,
+        artifact_id: UUID,
+        principal: Annotated[str, Depends(require_principal)],
+    ) -> Response:
+        artifact = require_ready_artifact(
+            await asyncio_to_thread(database.get_artifact, str(artifact_id), owner=principal)
+        )
+        return await deliver_artifact(
+            artifact, method=request.method, ttl_seconds=settings.s3_presign_ttl_seconds
+        )
+
+    @app.post(
+        "/api/v1/artifacts/{artifact_id}/direct-links",
+        response_model=ArtifactDirectLinkPublic,
+        status_code=status.HTTP_201_CREATED,
+        tags=["downloads"],
+    )
+    async def create_artifact_direct_link(
+        artifact_id: UUID,
+        body: ArtifactDirectLinkCreateRequest,
+        principal: Annotated[str, Depends(require_principal)],
+    ) -> dict[str, Any]:
+        if not settings.direct_links_enabled:
+            raise AppError("DIRECT_LINKS_DISABLED", "服务器未启用临时直链。", status_code=404)
+        artifact = require_ready_artifact(
+            await asyncio_to_thread(database.get_artifact, str(artifact_id), owner=principal)
+        )
+        if artifact.get("storage_backend") == "s3" and not artifact_storage.enabled:
+            raise AppError("STORAGE_UNAVAILABLE", "对象存储当前未配置。", status_code=503)
+        ttl_minutes = body.ttl_minutes or settings.direct_link_ttl_minutes
+        if ttl_minutes > settings.direct_link_max_ttl_minutes:
+            raise AppError(
+                "DIRECT_LINK_TTL_TOO_LONG",
+                f"临时直链最长有效 {settings.direct_link_max_ttl_minutes} 分钟。",
+                status_code=422,
+            )
+        now = datetime.now(UTC)
+        artifact_expiry = datetime.fromisoformat(artifact["expires_at"])
+        expires_at = min(now + timedelta(minutes=ttl_minutes), artifact_expiry)
+        if expires_at <= now:
+            raise AppError("ARTIFACT_EXPIRED", "下载文件已过期。", status_code=410)
+        expires = int(expires_at.timestamp())
+        signature = direct_link_signer.sign(artifact["id"], artifact["sha256"], expires)
+        url = f"/d/{artifact['id']}?expires={expires}&signature={quote(signature, safe='')}"
+        return {
+            "url": url,
+            "expires_at": expires_at,
+            "storage_backend": artifact.get("storage_backend", "local"),
+        }
+
+    @app.api_route("/d/{artifact_id}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def direct_download_artifact(
+        request: Request, artifact_id: str, expires: str = "", signature: str = ""
+    ) -> Response:
+        if not settings.direct_links_enabled:
+            raise AppError("NOT_FOUND", "下载文件不存在或已过期。", status_code=404)
+        try:
+            normalized_id = str(UUID(artifact_id))
+            expires_value = int(expires)
+            if str(expires_value) != expires:
+                raise ValueError
+        except (ValueError, TypeError):
+            raise AppError("NOT_FOUND", "下载文件不存在或已过期。", status_code=404) from None
+        now_timestamp = int(datetime.now(UTC).timestamp())
+        if (
+            expires_value <= now_timestamp
+            or expires_value > now_timestamp + settings.direct_link_max_ttl_minutes * 60 + 60
+        ):
+            raise AppError("NOT_FOUND", "下载文件不存在或已过期。", status_code=404)
+        artifact = require_ready_artifact(
+            await asyncio_to_thread(database.get_artifact, normalized_id), hide_expiry=True
+        )
+        if not direct_link_signer.verify(
+            normalized_id, artifact["sha256"], expires_value, signature
+        ):
+            raise AppError("NOT_FOUND", "下载文件不存在或已过期。", status_code=404)
+        remaining = max(1, expires_value - now_timestamp)
+        return await deliver_artifact(artifact, method=request.method, ttl_seconds=remaining)
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -520,6 +655,8 @@ def job_public(record: dict[str, Any], request_id: str) -> dict[str, Any]:
                 "media_type": artifact["media_type"],
                 "sha256": artifact["sha256"],
                 "primary": bool(artifact["primary"]),
+                "storage_backend": artifact.get("storage_backend", "local"),
+                "local_available": bool(artifact.get("local_available", True)),
                 "created_at": artifact["created_at"],
                 "expires_at": artifact["expires_at"],
                 "download_url": f"/api/v1/artifacts/{artifact['id']}",
@@ -608,7 +745,9 @@ def _runtime_capabilities(js_runtime: str) -> dict[str, Any]:
     }
 
 
-def readiness_checks(settings: Settings, database: Database) -> dict[str, Any]:
+def readiness_checks(
+    settings: Settings, database: Database, artifact_storage: S3ArtifactStorage
+) -> dict[str, Any]:
     try:
         db_ok = database.ping()
     except Exception:
@@ -622,6 +761,8 @@ def readiness_checks(settings: Settings, database: Database) -> dict[str, Any]:
     except OSError:
         pass
     runtime = settings.js_runtime
+    object_storage = artifact_storage.health()
+    object_storage["pending_deletions"] = database.pending_storage_deletion_count()
     return {
         "database": {"ok": db_ok},
         "storage": {
@@ -629,6 +770,7 @@ def readiness_checks(settings: Settings, database: Database) -> dict[str, Any]:
             "used_bytes": directory_size(settings.artifacts_dir),
             "limit_bytes": settings.max_storage_bytes,
         },
+        "object_storage": object_storage,
         "ffmpeg": {"ok": shutil.which("ffmpeg") is not None},
         "javascript_runtime": {
             "ok": bool(runtime and shutil.which(runtime)),
@@ -664,6 +806,7 @@ def run() -> None:
         log_level=settings.log_level,
         proxy_headers=settings.trusted_proxy,
         forwarded_allow_ips="127.0.0.1" if settings.trusted_proxy else "",
+        access_log=False,
     )
 
 

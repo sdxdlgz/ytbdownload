@@ -26,6 +26,9 @@
 		health_timeout 5s
 	}
 
+	# Direct-link signatures are bearer secrets and must not enter access logs.
+	log_skip /d/*
+
 	log {
 		output stdout
 		format console

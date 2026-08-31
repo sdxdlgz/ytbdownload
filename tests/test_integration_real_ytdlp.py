@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import subprocess
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -26,51 +27,13 @@ def test_real_ytdlp_ffmpeg_video_audio_and_thumbnail_pipeline() -> None:
         root = Path(temporary)
         media_root = root / "site"
         media_root.mkdir()
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=320x180:rate=15",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=880:sample_rate=44100",
-                "-t",
-                "1.2",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-shortest",
-                str(media_root / "sample.mp4"),
-            ],
-            check=True,
-            timeout=60,
-        )
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=c=0xc7ff2f:s=320x180",
-                "-frames:v",
-                "1",
-                str(media_root / "cover.jpg"),
-            ],
-            check=True,
-            timeout=30,
-        )
+        fixture_dir = Path(__file__).resolve().parent / "fixtures"
+        for encoded_name, output_name in (
+            ("sample.mp4.b64", "sample.mp4"),
+            ("cover.jpg.b64", "cover.jpg"),
+        ):
+            encoded = (fixture_dir / encoded_name).read_text(encoding="ascii")
+            (media_root / output_name).write_bytes(base64.b64decode(encoded, validate=True))
 
         server = ThreadingHTTPServer(
             ("127.0.0.1", 0), partial(SilentHandler, directory=str(media_root))
@@ -178,6 +141,7 @@ def probe_codec_type(path: Path) -> str:
     result = subprocess.run(
         [
             "ffprobe",
+            "-nostdin",
             "-v",
             "error",
             "-select_streams",

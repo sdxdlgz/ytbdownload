@@ -4,8 +4,10 @@ import hashlib
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +20,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = "Signal / yt-dlp Web"
@@ -75,6 +78,38 @@ class Settings(BaseSettings):
     x_accel_redirect: bool = False
     x_accel_prefix: str = "/_protected_downloads"
 
+    direct_links_enabled: bool = True
+    direct_link_ttl_minutes: int = Field(default=120, ge=1, le=10080)
+    direct_link_max_ttl_minutes: int = Field(default=1440, ge=1, le=10080)
+    direct_link_secret: SecretStr | None = None
+
+    s3_enabled: bool = False
+    s3_bucket: str = ""
+    s3_region: str = ""
+    s3_endpoint_url: str = ""
+    s3_allow_insecure_endpoint: bool = False
+    s3_access_key_id: SecretStr | None = None
+    s3_secret_access_key: SecretStr | None = None
+    s3_session_token: SecretStr | None = None
+    s3_prefix: str = "signal-artifacts"
+    s3_addressing_style: Literal["auto", "path", "virtual"] = "auto"
+    s3_keep_local: bool = True
+    s3_failure_mode: Literal["fallback", "required"] = "fallback"
+    s3_delete_on_expiry: bool = True
+    s3_presign_ttl_seconds: int = Field(default=7200, ge=60, le=604800)
+    s3_connect_timeout_seconds: int = Field(default=10, ge=1, le=120)
+    s3_read_timeout_seconds: int = Field(default=120, ge=5, le=3600)
+    s3_retry_attempts: int = Field(default=4, ge=1, le=20)
+    s3_multipart_threshold_mb: int = Field(default=64, ge=5, le=5120)
+    s3_multipart_chunksize_mb: int = Field(default=16, ge=5, le=5120)
+    s3_max_concurrency: int = Field(default=2, ge=1, le=16)
+    s3_server_side_encryption: Literal["", "AES256", "aws:kms"] = ""
+    s3_kms_key_id: SecretStr | None = None
+    s3_storage_class: str = ""
+    s3_verify_tls: bool = True
+    s3_ca_bundle: Path | None = None
+    s3_healthcheck: bool = False
+
     @field_validator("allowed_url_ports")
     @classmethod
     def validate_allowed_url_ports(cls, value: str) -> str:
@@ -96,6 +131,24 @@ class Settings(BaseSettings):
             raise ValueError("at least one allowed URL port is required")
         return ",".join(ports)
 
+    @field_validator("s3_prefix")
+    @classmethod
+    def normalize_s3_prefix(cls, value: str) -> str:
+        value = value.strip().strip("/")
+        if len(value) > 180 or ".." in value or "\\" in value:
+            raise ValueError("s3_prefix must be a safe relative object prefix")
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("s3_prefix contains control characters")
+        return value
+
+    @field_validator("s3_storage_class")
+    @classmethod
+    def normalize_s3_storage_class(cls, value: str) -> str:
+        value = value.strip().upper()
+        if value and not all(char.isalnum() or char in {"_", "-"} for char in value):
+            raise ValueError("s3_storage_class contains invalid characters")
+        return value
+
     @field_validator("environment")
     @classmethod
     def normalize_environment(cls, value: str) -> str:
@@ -113,7 +166,42 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def reject_placeholder_production_secrets(self) -> Settings:
+    def validate_cross_field_configuration(self) -> Settings:
+        if self.direct_link_ttl_minutes > self.direct_link_max_ttl_minutes:
+            raise ValueError("direct_link_ttl_minutes cannot exceed direct_link_max_ttl_minutes")
+
+        if self.s3_enabled:
+            if not self.s3_bucket.strip():
+                raise ValueError("s3_bucket is required when S3 storage is enabled")
+            if any(ord(char) < 32 or char.isspace() for char in self.s3_bucket):
+                raise ValueError("s3_bucket contains invalid characters")
+            has_key = bool(self.s3_access_key_id and self.s3_access_key_id.get_secret_value())
+            has_secret = bool(
+                self.s3_secret_access_key and self.s3_secret_access_key.get_secret_value()
+            )
+            if has_key != has_secret:
+                raise ValueError("S3 access key and secret key must be provided together")
+            has_session_token = bool(
+                self.s3_session_token and self.s3_session_token.get_secret_value()
+            )
+            if has_session_token and not (has_key and has_secret):
+                raise ValueError("S3 session token requires an access key and secret key")
+            if self.s3_endpoint_url:
+                parsed = urlsplit(self.s3_endpoint_url)
+                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                    raise ValueError("s3_endpoint_url must be an absolute HTTP(S) URL")
+                if parsed.username or parsed.password:
+                    raise ValueError("s3_endpoint_url cannot contain credentials")
+                if parsed.scheme == "http" and not self.s3_allow_insecure_endpoint:
+                    raise ValueError("HTTP S3 endpoints require s3_allow_insecure_endpoint=true")
+            kms_key = self.s3_kms_key_id.get_secret_value() if self.s3_kms_key_id else ""
+            if self.s3_server_side_encryption == "aws:kms" and not kms_key:
+                raise ValueError("s3_kms_key_id is required for aws:kms encryption")
+            if self.s3_ca_bundle and not self.s3_ca_bundle.is_file():
+                raise ValueError("configured s3_ca_bundle does not exist")
+        elif self.s3_failure_mode == "required" or not self.s3_keep_local:
+            raise ValueError("required/remote-only artifact storage requires s3_enabled=true")
+
         if self.environment != "production":
             return self
         placeholders = ("CHANGE_ME", "REPLACE_ME", "CHANGEME")
@@ -123,6 +211,16 @@ class Settings(BaseSettings):
             raise ValueError("replace the placeholder YTDLP_WEB_APP_SECRET before production")
         if self.access_token and len(self.access_token) < 24:
             raise ValueError("production access_token must contain at least 24 characters")
+        if self.direct_links_enabled:
+            direct_override = (
+                self.direct_link_secret.get_secret_value() if self.direct_link_secret else ""
+            )
+            direct_secret = direct_override or self.app_secret
+            if direct_secret.upper().startswith(placeholders) or len(direct_secret) < 32:
+                raise ValueError(
+                    "production direct links require a non-placeholder 32+ character "
+                    "direct_link_secret or app_secret"
+                )
         return self
 
     @property
@@ -161,6 +259,25 @@ class Settings(BaseSettings):
     def session_signing_key(self) -> bytes:
         source = self.app_secret or self.access_token or os.environ.get("HOSTNAME", "yt-dlp-web")
         return hashlib.sha256(f"signal-session-v1:{source}".encode()).digest()
+
+    @property
+    def direct_link_signing_key(self) -> bytes:
+        override = self.direct_link_secret.get_secret_value() if self.direct_link_secret else ""
+        source = (
+            override
+            or self.app_secret
+            or self.access_token
+            or os.environ.get("HOSTNAME", "yt-dlp-web")
+        )
+        return hashlib.sha256(f"signal-artifact-direct-v1:{source}".encode()).digest()
+
+    @property
+    def s3_multipart_threshold_bytes(self) -> int:
+        return self.s3_multipart_threshold_mb * 1024 * 1024
+
+    @property
+    def s3_multipart_chunksize_bytes(self) -> int:
+        return self.s3_multipart_chunksize_mb * 1024 * 1024
 
     @property
     def allowed_hosts_list(self) -> list[str]:

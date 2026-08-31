@@ -36,10 +36,17 @@ export YTDLP_WEB_MAX_FILESIZE_MB=100
 setsid "$PYTHON_BIN" -m uvicorn app.main:app \
   --host 127.0.0.1 --port 8766 --workers 1 --no-access-log &
 SERVER_PID=$!
-for _attempt in $(seq 1 240); do
+for _attempt in $(seq 1 480); do
   curl --fail --silent http://127.0.0.1:8766/api/v1/health/live >/dev/null && break
   kill -0 "$SERVER_PID" 2>/dev/null || { echo "Server exited early" >&2; exit 1; }
   sleep 0.25
 done
 curl --fail --silent http://127.0.0.1:8766/api/v1/health/live >/dev/null
+if [[ -n "${BROWSER_E2E_EXPECT_BACKEND:-}" ]]; then
+  ACTUAL_BACKEND="$(curl --fail --silent http://127.0.0.1:8766/api/v1/config | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["delivery"]["default_backend"])')"
+  if [[ "$ACTUAL_BACKEND" != "$BROWSER_E2E_EXPECT_BACKEND" ]]; then
+    echo "Expected backend $BROWSER_E2E_EXPECT_BACKEND, got $ACTUAL_BACKEND" >&2
+    exit 1
+  fi
+fi
 "$PYTHON_BIN" tests/browser_real_e2e.py
