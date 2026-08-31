@@ -141,7 +141,6 @@ def probe_codec_type(path: Path) -> str:
     result = subprocess.run(
         [
             "ffprobe",
-            "-nostdin",
             "-v",
             "error",
             "-select_streams",
@@ -152,9 +151,15 @@ def probe_codec_type(path: Path) -> str:
             "default=noprint_wrappers=1:nokey=1",
             str(path),
         ],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         timeout=30,
     )
+    assert result.returncode == 0, {
+        "path": str(path),
+        "exists": path.exists(),
+        "size": path.stat().st_size if path.exists() else None,
+        "stderr": result.stderr,
+    }
     return result.stdout.strip()

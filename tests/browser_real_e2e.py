@@ -147,7 +147,6 @@ def probe(path: Path, selector: str) -> str:
     result = subprocess.run(
         [
             "ffprobe",
-            "-nostdin",
             "-v",
             "error",
             "-select_streams",
